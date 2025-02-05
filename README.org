@@ -2,6 +2,21 @@
 
 This is an Emacs package that publishes files to (AWS-compatible) S3.
 
+** Installation
+
+This package is not on MELPA (yet). The package is self-contained in
+one file: [[s3-publish.el]].
+
+You can install it declaratively with [[https://github.com/radian-software/straight.el][straight.el]] and it will pull it
+directly from this git repository:
+
+#+begin_src emacs-lisp
+  (use-package
+    s3-publish
+    :straight
+    (s3-publish :type git :repo "https://github.com/enigmacurry/s3-publish.el.git"))
+#+end_src
+
 ** License
 
 This software is distributed under the 0BSD license:
