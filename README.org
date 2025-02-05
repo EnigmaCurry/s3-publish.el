@@ -1,21 +1,188 @@
 #+title: Publish to S3 from Emacs
 
-This is an Emacs package that publishes files to (AWS-compatible) S3.
+This is an Emacs package that publishes files to S3 (AWS S3,
+DigitalOcean spaces, etc.)
 
 ** Installation
 
 This package is not on MELPA (yet). The package is self-contained in
-one file: [[s3-publish.el]].
+one file: =s3-publish.el=.
 
-You can install it declaratively with [[https://github.com/radian-software/straight.el][straight.el]] and it will pull it
-directly from this git repository:
+You can declare the dependency in your config with use-package +
+[[https://github.com/radian-software/straight.el][straight.el]], and it will pull it directly from this git repository:
 
 #+begin_src emacs-lisp
   (use-package
     s3-publish
     :straight
-    (s3-publish :type git :repo "https://github.com/enigmacurry/s3-publish.el.git"))
+    (s3-publish :type git :repo "https://github.com/EnigmaCurry/s3-publish.el.git"))
 #+end_src
+
+** Configuration
+
+You must configure a profile for each S3 bucket you want to publish
+to. Run =M-x s3-publish-manage-profiles= to interactively manage your
+profiles. Your profiles will be stored in your Emacs' custom.el file
+as =s3-publish-profiles=.
+
+*** Example: DigitalOcean spaces
+
+Create a bucket:
+
+ * Login to your DigitalOcean account at cloud.digitalocean.com
+ * Go to the =Spaces Object Storage= page.
+ * Click =Create Bucket=.
+ * Select the desired data center region, e.g. =nyc3=.
+ * Choose a unique name for the bucket, e.g. =gargleblaster=.
+ * Don't enable CDN for this basic example.
+ * Finalize the creation of the bucket.
+
+Create the access key:
+
+ * Go to the bucket =Settings= page.
+ * Click =Create Access Key=
+ * Choose =Read/Write/Delete= permission.
+ * List all of the buckets the access key is allowed to use (one by
+   default).
+ * Enter a descriptive name for the key like =mymachine-s3-publish-emacs=
+ * Finalize the creation of the Access Key.
+ * Copy the Access Key ID and the Secret Access Key. The secret will
+   not be shown again.
+
+Setup s3-publish in Emacs:
+
+ * Run =M-x s3-publish-manage-profiles=.
+
+This will open up a buffer named =s3-publish-profiles=, which will
+initially display =No s3-publish profiles defined=.
+
+In the minibuffer you should see a list of actions you can perform:
+
+ * Add
+ * Remove
+ * Edit
+ * Done
+
+Add a new profile:
+
+ * Choose the =Add= action.
+ * Enter the =Profile name=:, this can be any name you choose, perhaps
+   the same name as the bucket, e.g. =gargleblaster=.
+ * Enter the =Endpoint URL=, which is listed at the top of the bucket
+   page, e.g. =https://gargleblaster.nyc3.digitaloceanspaces.com=
+ * Enter the bucket name (again). e.g. =gargleblaster=.
+ * Choose whether you want the files to be made public or not. =Make
+   files public? (y or n)=
+
+You should now see the =s3-publish-profiles= buffer has been updated
+to show your configured profiles. Select =Done= when finished.
+
+** Prepare credentials auth-source
+
+The S3 access keys and secret keys are not stored in the profile, but
+are accessed through [[https://www.gnu.org/software/emacs/manual/html_mono/auth.html][Emacs' configurable auth-source system]].
+
+To create a simple unencrypted auth-source, create a file in your home
+directory. Create the file =~/.authinfo= and enter the credentials for
+the profile:
+
+#+begin_src text
+machine s3-publish-gargleblaster login XXXXXXXXXXXXXXXXXX secret XXXXXXXXXXXXXXXXXXXX
+#+end_src
+
+The profile is matched against the authinfo machine name. Here's the
+breakdown on the authinfo syntax:
+
+ * The first word is literally =machine=.
+ * The second word must start with =s3-publish-= and then the name of
+   the profile, e.g. =gargleblaster=.
+ * The third word is literally =login=.
+ * The fifth word is the S3 Access Key credential.
+ * The sixth word is literally =secret=
+ * The seventh word is the S3 Secret Key credential.
+
+Make sure to save the file, and then inform Emacs to reload this file:
+=M-x auth-source-forget-all-cached=.
+
+Emacs auth-source supports many different backends that are more
+secure than this plain authinfo file, including:
+
+ * Gnome Keyring
+ * KDE Wallet
+ * KeepassXC
+ * Unix password store
+
+To set these up is left as an exercise to the reader.
+
+** Usage
+
+*** Publish buffer
+
+You can publish your current buffer:
+
+ * =M-x s3-publish-buffer=
+ * From the list, select the S3 profile destination.
+ * The buffer will be immediately uploaded to S3.
+ * The URL will be printed in the minibuffer and copied to
+   =kill-ring=.
+
+If you chose to allow public access, the URL will start with
+=https://=, otherwise it will start with =s3://=.
+
+The URL should have a file extension that is derived from the buffer
+name.
+
+The buffer can even contain non-text data, e.g. images. In this case,
+choose the encoding type =raw=.
+
+*** Publish Region
+
+Like publishing buffers, you can publish a select region of text.
+
+ * Select a region of text in any buffer.
+ * =M-x s3-publish-region=.
+ * From the list, select the S3 profile destination.
+ * The region will be published with a =.txt= extension.
+ * The URL will be printed in the minibuffer and copied to
+   =kill-ring=.
+
+*** Publish Org Buffer
+
+In org-mode you can export the buffer to HTML and publish it in one
+step:
+
+ * =M-x s3-publish-org-buffer=
+ * From the list, select the S3 profile destination.
+ * The buffer will be export to HTML and immediately uploaded to S3.
+ * The URL will be printed in the minibuffer and copied to
+   =kill-ring=.
+
+*** Publish from dired mode
+
+You can publish multiple files at once from a dired buffer:
+
+ * Open any directory in =dired-mode=.
+ * Mark multiple files with the =m= key (directories not supported).
+ * =M-x s3-publish-dired-upload-files=.
+ * All of the marked files will be uploaded to S3.
+ * All of the URLs will be printed in the minibuffer and copied to
+   =kill-ring=.
+ * List of URLs output are separated by newlines.
+
+** Lifecycle
+
+You can set the S3 lifecycle of the bucket to let objects expire. You
+will usually need an increased permission level to perform this action
+(e.g. on DigitalOcean spaces you must select the =All permissions=
+option, which gives full access to ALL your buckets.)
+
+ * =M-x s3-publish-bucket-lifecycle=
+ * Select the profile to manage.
+ * Enter the number of days that objects may live before expiration.
+   e.g., =1=, =10=, or leave blank to delete the lifecycle config.
+
+If you don't have adequate permission, you will see the error in the
+mini buffer.
 
 ** License
 
