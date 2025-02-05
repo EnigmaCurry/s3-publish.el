@@ -12,10 +12,14 @@ You can declare the dependency in your config with use-package +
 [[https://github.com/radian-software/straight.el][straight.el]], and it will pull it directly from this git repository:
 
 #+begin_src emacs-lisp
-  (use-package
-    s3-publish
-    :straight
-    (s3-publish :type git :repo "https://github.com/EnigmaCurry/s3-publish.el.git"))
+(use-package
+  s3-publish
+  :straight
+  (s3-publish
+   :type
+   git
+   :repo
+   "https://github.com/EnigmaCurry/s3-publish.el.git"))
 #+end_src
 
 ** Configuration
