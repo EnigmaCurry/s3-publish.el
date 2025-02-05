@@ -17,6 +17,11 @@
 ;;; Usage:
 ;;
 
+(require 'auth-source)
+(require 'dired)
+(require 'ox-html)
+
+
 (defgroup s3-publish nil
   "Settings for publishing files to S3-compatible storage."
   :prefix "s3-publish-"
@@ -32,7 +37,7 @@ Each profile is an alist containing the following keys:
 The auth-source machine name will be derived by prepending \"s3-publish-\" to
 the profile name.
 Example:
-  '((:name \"default\"
+  ((:name \"default\"
      :endpoint \"s3.amazonaws.com\"
      :bucket \"my-bucket\"
      :public-acl t)
