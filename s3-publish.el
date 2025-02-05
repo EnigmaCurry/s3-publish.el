@@ -106,29 +106,29 @@ If the buffer does not exist, it is created."
 (defun s3-publish-manage-profiles ()
   "Manage s3-publish profiles interactively.
 Immediately displays a list of profiles in a dedicated buffer.
-Then, prompts you to Add, Edit, or Remove a profile.
-The profiles buffer automatically updates after any change.
-When you quit (with C-g), the profiles window is closed and the buffer is killed."
+Then, prompts you to Add, Edit, Remove, or Done.
+Selecting Done exits the management session, closing the profiles window and killing the buffer."
   (interactive)
   (s3-publish-refresh-profiles-buffer)
-  (condition-case nil
-      (while t
-        (let ((action (completing-read "Manage s3-publish profiles (Add/Edit/Remove, C-g when done): "
-                                       '("Add" "Edit" "Remove") nil t)))
-          (cond
-           ((string= action "Add")
-            (s3-publish-add-profile))
-           ((string= action "Edit")
-            (s3-publish-edit-profile))
-           ((string= action "Remove")
-            (s3-publish-remove-profile)))
-          (s3-publish-refresh-profiles-buffer)))
-    (quit
-     (let ((win (get-buffer-window s3-publish-profiles-buffer)))
-       (when win
-         (delete-window win)))
-     (kill-buffer s3-publish-profiles-buffer)
-     (message "Exited s3-publish profile management."))))
+  (catch 'done
+    (while t
+      (let ((action (completing-read "Manage s3-publish profiles (Add/Edit/Remove/Done): "
+                                     '("Add" "Edit" "Remove" "Done") nil t)))
+        (cond
+         ((string= action "Add")
+          (s3-publish-add-profile))
+         ((string= action "Edit")
+          (s3-publish-edit-profile))
+         ((string= action "Remove")
+          (s3-publish-remove-profile))
+         ((string= action "Done")
+          (throw 'done nil)))
+        (s3-publish-refresh-profiles-buffer))))
+  (let ((win (get-buffer-window s3-publish-profiles-buffer)))
+    (when win
+      (delete-window win)))
+  (kill-buffer s3-publish-profiles-buffer)
+  (message "s3-publish profiles saved."))
 
 (defun s3-publish-list-profiles ()
   "List all s3-publish profiles in a temporary buffer."
@@ -283,11 +283,11 @@ PROFILE is a plist that must include :bucket, :endpoint, and credentials
 `s3-publish-get-file-key', and a temporary s3cmd config file is created
 using `s3-publish-generate-s3cmd-config'.
 The s3cmd command is run:
-  s3cmd --config TMP_CONFIG put FILE s3://BUCKET/KEY
+  s3cmd --config TMP_CONFIG [--acl-public] put FILE s3://BUCKET/KEY
 If the upload is successful and the profile’s :public-acl is non-nil,
 this function returns the public URL for the file (constructed as
   https://BUCKET.HOST_BASE/KEY).
-If :public-acl is nil, it returns t.
+If :public-acl is nil, it returns the S3 URI (e.g., s3://BUCKET/KEY).
 If the upload fails, it signals an error with the error message."
   (let* ((key (s3-publish-get-file-key file))
          (s3cmd-config (s3-publish-generate-s3cmd-config profile))
@@ -305,7 +305,7 @@ If the upload fails, it signals an error with the error message."
          (acl-args (if (plist-get profile :public-acl)
                        (list "--acl-public")
                      nil))
-         (args (append (list "--config" s3cmd-config) acl-args (list "put" file s3-uri)))
+         (args (append (list "--config" s3cmd-config) acl-args (list "put" file s3-uri) (list "--add-header=x-amz-tagging: temp=temp")))
          (output-buffer (generate-new-buffer "*s3-publish-upload-output*"))
          exit-code)
     (unwind-protect
@@ -315,14 +315,113 @@ If the upload fails, it signals an error with the error message."
               (if (plist-get profile :public-acl)
                   ;; Construct public URL: using HTTPS, bucket as subdomain of host-base.
                   (format "https://%s.%s/%s" bucket host-base key)
-                t)
+                s3-uri)
             (with-current-buffer output-buffer
               (error "Upload failed: %s" (buffer-string)))))
       (kill-buffer output-buffer))))
+
+(defun s3-publish-org-buffer ()
+  "Export the current Org buffer to HTML, upload it to S3, and copy the URL to the kill ring.
+The function prompts for an S3 profile (from `s3-publish-profiles`) to use for the upload.
+It always returns a URL: if the profile’s :public-acl is non-nil, it returns a public URL,
+otherwise it returns an s3://BUCKET/KEY URL.
+The URL is copied to the kill ring."
+  (interactive)
+  ;; Export current Org buffer to an HTML file.
+  (let* ((html-file (org-html-export-to-html))
+         ;; Resolve symlink if html-file is a symlink.
+         (html-file (if (file-symlink-p html-file)
+                        (file-truename html-file)
+                      html-file))
+         (profile-names (mapcar (lambda (p) (plist-get p :name)) s3-publish-profiles))
+         (default (if (member "default" profile-names) "default" (car profile-names)))
+         (profile-name (completing-read "Select S3 profile: " profile-names nil t nil nil default))
+         (profile (s3-publish-get-credentials (s3-publish-get-profile profile-name)))
+         (upload-result (s3-publish-upload-file html-file profile)))
+    (kill-new upload-result)
+    (message "%s" upload-result)))
+
+(defun s3-publish-region (start end)
+  "Publish the currently selected region to S3.
+The region from START to END is saved to a temporary .txt file,
+then uploaded using an S3 profile chosen interactively from
+`s3-publish-profiles'. The resulting URL is copied to the kill ring
+and displayed in the echo area."
+  (interactive "r")
+  (unless (use-region-p)
+    (error "No region selected"))
+  (let* ((temp-file (make-temp-file "s3-publish-region-" nil ".txt"))
+         ;; Write the region to the temporary file.
+         (region-text (buffer-substring-no-properties start end)))
+    (with-temp-file temp-file
+      (insert region-text))
+    ;; Prompt for a profile.
+    (let* ((profile-names (mapcar (lambda (p) (plist-get p :name)) s3-publish-profiles))
+           (default (if (member "default" profile-names) "default" (car profile-names)))
+           (profile-name (completing-read "Select S3 profile: " profile-names nil t nil nil default))
+           (profile (s3-publish-get-credentials (s3-publish-get-profile profile-name)))
+           (upload-result (s3-publish-upload-file temp-file profile))
+           (url (if (stringp upload-result) upload-result upload-result)))
+      ;; Clean up temporary file.
+      (delete-file temp-file)
+      (kill-new url)
+      (message "%s" url)
+      url)))
+
+(defun s3-publish-bucket-lifecycle (profile-name days-input)
+  "Set or delete the S3 lifecycle expiration policy for the bucket of PROFILE-NAME.
+If DAYS-INPUT is non-empty, set the expiration policy using
+  s3cmd expire --config CONFIG --expiry-days=DAYS s3://BUCKET
+If DAYS-INPUT is empty, delete the lifecycle policy using
+  s3cmd dellifecycle --config CONFIG s3://BUCKET
+PROFILE-NAME is selected from `s3-publish-profiles' and used to retrieve
+the bucket name and credentials. An error is signaled if no bucket is defined."
+  (interactive (list (completing-read "Select S3 profile: "
+                                      (mapcar (lambda (p) (plist-get p :name))
+                                              s3-publish-profiles)
+                                      nil t)
+                     (read-string "Enter number of expiry days (leave blank to delete policy): ")))
+  (let* ((profile (s3-publish-get-credentials (s3-publish-get-profile profile-name)))
+         (bucket (plist-get profile :bucket)))
+    (unless bucket
+      (error "No bucket defined for profile %s" profile-name))
+    (let* ((s3cmd-config (s3-publish-generate-s3cmd-config profile))
+           (command (if (string= days-input "")
+                        "dellifecycle"
+                      "expire"))
+           (args (if (string= days-input "")
+                     (list "--config" s3cmd-config (format "s3://%s" bucket))
+                   (list "--config" s3cmd-config (format "--expiry-days=%s" days-input)
+                         (format "s3://%s" bucket))))
+           (output-buffer (generate-new-buffer "*s3cmd-output*"))
+           (exit-code (apply 'call-process "s3cmd" nil output-buffer nil (cons command args))))
+      (unwind-protect
+          (if (zerop exit-code)
+              (if (string= days-input "")
+                  (message "Lifecycle policy deleted for bucket %s." bucket)
+                (message "Lifecycle policy set for bucket %s: objects expire after %s days" bucket days-input))
+            (with-current-buffer output-buffer
+              (error "Error updating lifecycle policy: %s" (buffer-string))))
+        (kill-buffer output-buffer)))))
+
+
+
 
 ;;(s3-publish-get-credentials (s3-publish-get-profile "org-tmp"))
 ;;(s3-publish-generate-key "/asdf.txt")
 ;;(s3-publish-generate-s3cmd-config (s3-publish-get-credentials (s3-publish-get-profile "org-tmp")))
 
+;; (let ((test-file (make-temp-file "s3-publish-test-" nil ".txt")))
+;;   ;; Write some test content to the temporary file.
+;;   (with-temp-file test-file
+;;     (insert "This is a test file for s3-publish."))
+;;   (message "Test file created: %s" test-file)
+;;   ;; Retrieve the "default" profile (with credentials)
+;;   (let ((profile (s3-publish-get-credentials (s3-publish-get-profile "org-tmp"))))
+;;     (message "Uploading file using profile 'org-tmp'...")
+;;     (let ((result (s3-publish-upload-file test-file profile)))
+;;       (if (stringp result)
+;;           (message "%s" result)
+;;         (message "Upload succeeded.")))))
 
 (provide 's3-publish)
