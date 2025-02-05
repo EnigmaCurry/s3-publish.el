@@ -513,6 +513,47 @@ copied to the kill ring and displayed."
          (result (s3-publish-upload-multiple-files files profile)))
     result))
 
+(defun s3-publish-remove-file (file)
+  "Remove FILE from S3.
+FILE’s S3 key is generated using `s3-publish-get-file-key'.
+The function prompts for an S3 profile (from `s3-publish-profiles')
+to use for removal. It then generates a temporary s3cmd config file
+(with credentials) and runs:
+  s3cmd --config CONFIG del s3://BUCKET/KEY
+If the removal is successful, a success message (and the S3 URI) is returned.
+If the removal fails, an error is signaled with the output from s3cmd."
+  (interactive "fFile to remove from S3: ")
+  (let* ((profile-names (mapcar (lambda (p) (plist-get p :name))
+                                s3-publish-profiles))
+         (profile-name (completing-read "Select S3 profile: " profile-names nil t))
+         (profile (s3-publish-get-credentials (s3-publish-get-profile profile-name)))
+         (key (s3-publish-get-file-key file))
+         (bucket (plist-get profile :bucket))
+         (s3-uri (format "s3://%s/%s" bucket key))
+         (s3cmd-config (s3-publish-generate-s3cmd-config profile))
+         (args (list "--config" s3cmd-config "del" s3-uri))
+         (output-buffer (generate-new-buffer "*s3-publish-remove-output*"))
+         exit-code)
+    (unwind-protect
+        (progn
+          (setq exit-code (apply 'call-process "s3cmd" nil output-buffer nil args))
+          (if (zerop exit-code)
+              (progn
+                (message "Successfully removed %s from S3" s3-uri)
+                s3-uri)
+            (with-current-buffer output-buffer
+              (error "Error removing file from S3: %s" (buffer-string)))))
+      (kill-buffer output-buffer))))
+
+(defun s3-publish-remove-buffer ()
+  "Remove the file associated with the current buffer from S3.
+This function calls `s3-publish-remove-file' on the current buffer's file path.
+If the buffer is not visiting a file, it signals an error."
+  (interactive)
+  (let ((file (buffer-file-name)))
+    (if file
+        (s3-publish-remove-file file)
+      (error "Current buffer is not visiting a file"))))
 
 
 ;;(s3-publish-get-credentials (s3-publish-get-profile "org-tmp"))
