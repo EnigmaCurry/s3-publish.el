@@ -157,7 +157,7 @@ step:
 
  * =M-x s3-publish-org-buffer=
  * From the list, select the S3 profile destination.
- * The buffer will be export to HTML and immediately uploaded to S3.
+ * The buffer will be exported to HTML and immediately uploaded to S3.
  * The URL will be printed in the minibuffer and copied to
    =kill-ring=.
 
@@ -172,6 +172,14 @@ You can publish multiple files at once from a dired buffer:
  * All of the URLs will be printed in the minibuffer and copied to
    =kill-ring=.
  * List of URLs output are separated by newlines.
+
+** Updating files
+
+The S3 keys and public URLs use a filename that is a hash of the local
+path of the file. This means that if you upload the same file twice,
+it will keep the same key/URL. =s3-publish-region= is an exception, it
+will always create a new temporary file to export to, and therefore it
+will have a new key.
 
 ** Lifecycle
 
