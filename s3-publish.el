@@ -341,6 +341,35 @@ The URL is copied to the kill ring."
     (kill-new upload-result)
     (message "%s" upload-result)))
 
+(defun s3-publish-buffer ()
+  "Publish the entire current buffer to S3.
+The contents of the current buffer are saved to a temporary file.
+If the buffer is visiting a file, its extension is used; otherwise, \".txt\"
+is used as the default extension. The file is then uploaded using an S3 profile
+chosen interactively from `s3-publish-profiles'. The resulting URL is copied to
+the kill ring and displayed in the echo area."
+  (interactive)
+  (let* ((buffer-filename (buffer-file-name))
+         (ext (if (and buffer-filename (file-name-extension buffer-filename))
+                  (concat "." (file-name-extension buffer-filename))
+                ".txt"))
+         (temp-file (make-temp-file "s3-publish-buffer-" nil ext))
+         (contents (buffer-substring-no-properties (point-min) (point-max))))
+    (with-temp-file temp-file
+      (insert contents))
+    ;; Prompt for a profile.
+    (let* ((profile-names (mapcar (lambda (p) (plist-get p :name))
+                                  s3-publish-profiles))
+           (profile-name (completing-read "Select S3 profile: " profile-names nil t))
+           (profile (s3-publish-get-credentials (s3-publish-get-profile profile-name)))
+           (upload-result (s3-publish-upload-file temp-file profile))
+           (url (if (stringp upload-result) upload-result upload-result)))
+      (delete-file temp-file)
+      (kill-new url)
+      (message "%s" url)
+      url)))
+
+
 (defun s3-publish-region (start end)
   "Publish the currently selected region to S3.
 The region from START to END is saved to a temporary .txt file,
@@ -404,24 +433,48 @@ the bucket name and credentials. An error is signaled if no bucket is defined."
               (error "Error updating lifecycle policy: %s" (buffer-string))))
         (kill-buffer output-buffer)))))
 
+(defun s3-publish-upload-multiple-files (files profile)
+  "Upload multiple FILES to S3 using PROFILE.
+FILES should be a list of file paths.
+This function validates that every file exists and is not a directory
+(allowing symlinks to files), and aborts if any file is invalid.
+Each file is uploaded using `s3-publish-upload-file' with PROFILE.
+All returned URLs (one per file) are concatenated (one per line),
+copied to the kill ring, and returned."
+  (unless (and files (cl-every (lambda (f)
+                                 (and (file-exists-p f)
+                                      (not (file-directory-p f))))
+                               files))
+    (error "One or more selected files do not exist or are not regular files"))
+  (let ((urls (mapcar (lambda (file)
+                        (s3-publish-upload-file file profile))
+                      files))
+        (result ""))
+    (setq result (string-join urls "\n"))
+    (kill-new result)
+    (message "Uploaded files. URLs (one per line) copied to kill ring:\n%s" result)
+    result))
+
+(defun s3-publish-dired-upload-files ()
+  "In Dired, upload the marked files to S3.
+The function first retrieves the marked files, then prompts for an S3 profile
+(from `s3-publish-profiles`). It then validates that all files exist and are
+not directories before uploading them. The resulting URLs (one per line) are
+copied to the kill ring and displayed."
+  (interactive)
+  (let* ((files (dired-get-marked-files))
+         (profile-name (completing-read "Select S3 profile: "
+                                        (mapcar (lambda (p) (plist-get p :name))
+                                                s3-publish-profiles)
+                                        nil t))
+         (profile (s3-publish-get-credentials (s3-publish-get-profile profile-name)))
+         (result (s3-publish-upload-multiple-files files profile)))
+    result))
 
 
 
 ;;(s3-publish-get-credentials (s3-publish-get-profile "org-tmp"))
 ;;(s3-publish-generate-key "/asdf.txt")
 ;;(s3-publish-generate-s3cmd-config (s3-publish-get-credentials (s3-publish-get-profile "org-tmp")))
-
-;; (let ((test-file (make-temp-file "s3-publish-test-" nil ".txt")))
-;;   ;; Write some test content to the temporary file.
-;;   (with-temp-file test-file
-;;     (insert "This is a test file for s3-publish."))
-;;   (message "Test file created: %s" test-file)
-;;   ;; Retrieve the "default" profile (with credentials)
-;;   (let ((profile (s3-publish-get-credentials (s3-publish-get-profile "org-tmp"))))
-;;     (message "Uploading file using profile 'org-tmp'...")
-;;     (let ((result (s3-publish-upload-file test-file profile)))
-;;       (if (stringp result)
-;;           (message "%s" result)
-;;         (message "Upload succeeded.")))))
 
 (provide 's3-publish)
