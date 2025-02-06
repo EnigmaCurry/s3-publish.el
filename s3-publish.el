@@ -609,5 +609,88 @@ copied to the kill ring, and displayed."
        result-str)
       result-str)))
 
+(defun s3-publish-remove-urls (urls-string)
+  "Remove multiple files from S3 given their public URLs.
+URLS-STRING is a string with one URL per line.
+Prompts for an S3 profile, then for each URL:
+  - Parses the URL to extract the bucket and key.
+  - Validates that the URL’s bucket and host match the selected profile.
+  - Constructs the S3 URI and invokes s3cmd to remove the object.
+At the end, prints how many objects were deleted."
+  (interactive "sS3 URLs to remove (one per line): ")
+  (let* ((lines (split-string urls-string "\n" t "[ \t\n]+"))
+         (profile-names (mapcar (lambda (p) (plist-get p :name))
+                                s3-publish-profiles))
+         (profile-name
+          (completing-read "Select S3 profile: " profile-names nil t))
+         (profile
+          (s3-publish-get-credentials (s3-publish-get-profile profile-name)))
+         (profile-bucket (plist-get profile :bucket))
+         (endpoint (plist-get profile :endpoint)))
+    (unless (and profile-bucket endpoint)
+      (error "Profile '%s' must have both :bucket and :endpoint defined"
+             profile-name))
+    (let ((results
+           (mapcar
+            (lambda (url)
+              (let* ((url (string-trim url))
+                     (parsed (url-generic-parse-url url))
+                     (url-host (url-host parsed))
+                     (url-path (url-filename parsed))
+                     ;; Expect host format: "BUCKET.host-base"
+                     (host-parts (and url-host (split-string url-host "\\.")))
+                     (url-bucket (if (and host-parts (car host-parts))
+                                     (car host-parts)
+                                (error "Cannot parse bucket from URL: %s" url)))
+                     (url-host-base (if (cdr host-parts)
+                                      (mapconcat 'identity (cdr host-parts) ".")
+                             (error "Cannot parse host base from URL: %s" url)))
+                     (key (if (> (length url-path) 1)
+                              (substring url-path 1)
+                            (error "No S3 key found in URL: %s" url)))
+                     ;; Normalize the endpoint's host base.
+                     (profile-host-base
+                      (replace-regexp-in-string "^https?://" "" endpoint))
+                     (profile-host-base
+                      (replace-regexp-in-string "/$" "" profile-host-base))
+                     (profile-host-base
+                      (if (string-prefix-p
+                           (concat profile-bucket ".") profile-host-base)
+                          (replace-regexp-in-string
+                           (concat "^"
+                                   (regexp-quote (concat profile-bucket ".")))
+                                                    "" profile-host-base)
+                                          profile-host-base)))
+                ;; Verify that the URL's bucket matches the profile's bucket.
+                (unless (string= profile-bucket url-bucket)
+    (error "Bucket mismatch: URL bucket '%s' does not match profile bucket '%s'"
+                         url-bucket profile-bucket))
+                ;; Verify that the URL's computed host base.
+                (unless (string= profile-host-base url-host-base)
+      (error "Host mismatch: URL host '%s' does not match profile endpoint '%s'"
+                         url-host profile-host-base))
+                ;; Construct the S3 URI and remove the file.
+                (let* ((s3-uri (format "s3://%s/%s" profile-bucket key))
+                       (s3cmd-config (s3-publish-generate-s3cmd-config profile))
+                       (args (list "--config" s3cmd-config "del" s3-uri))
+                       (output-buffer
+                        (generate-new-buffer "*s3-publish-remove-urls-output*"))
+                       exit-code)
+                  (unwind-protect
+                      (progn
+                        (setq exit-code
+                              (apply 'call-process "s3cmd"
+                                     nil output-buffer nil args))
+                        (if (zerop exit-code)
+                            (progn
+                              (message "Successfully removed %s" s3-uri)
+                              t)
+                          (with-current-buffer output-buffer
+                            (error
+                             "Error removing %s: %s" s3-uri (buffer-string)))))
+                    (kill-buffer output-buffer)))))
+            lines)))
+      (message "Deleted %d object(s) from S3" (length results))
+      (length results))))
 
 (provide 's3-publish)
