@@ -100,7 +100,7 @@ If the buffer does not exist, it is created."
       (if s3-publish-profiles
           (dolist (p s3-publish-profiles)
             (insert (format
-                     "Name: %s\nEndpoint: %s\nBucket: %s\nPublic ACL: %s\nSalt: %s\n\n"
+              "Name: %s\nEndpoint: %s\nBucket: %s\nPublic ACL: %s\nSalt: %s\n\n"
                      (plist-get p :name)
                      (plist-get p :endpoint)
                      (plist-get p :bucket)
@@ -146,7 +146,7 @@ killing the buffer."
       (with-output-to-temp-buffer "*s3-publish-profiles*"
         (dolist (p s3-publish-profiles)
           (princ (format
-                  "Name: %s\nEndpoint: %s\nBucket: %s\nPublic ACL: %s\nSalt: %s\n\n"
+              "Name: %s\nEndpoint: %s\nBucket: %s\nPublic ACL: %s\nSalt: %s\n\n"
                   (plist-get p :name)
                   (plist-get p :endpoint)
                   (plist-get p :bucket)
@@ -248,7 +248,7 @@ it is appended to the key."
                         (i 0)
                         (len (length s)))
                     (while (< i len)
-                      (setq result (concat result (substring s i (min len (+ i n)))))
+                 (setq result (concat result (substring s i (min len (+ i n)))))
                       (setq i (+ i n))
                       (unless (>= i len)
                         (setq result (concat result "-"))))
@@ -262,8 +262,10 @@ it is appended to the key."
   "Upload FILE to S3 using PROFILE.
 PROFILE is a plist that must include :bucket, :endpoint, and credentials
 (:access-key and :secret-key), and now also :salt.
-The file’s key is generated using `s3-publish-get-file-key' with the profile’s salt,
-and a temporary s3cmd config file is created using `s3-publish-generate-s3cmd-config'.
+The file’s key is generated using `s3-publish-get-file-key' with the profile’s
+salt,
+and a temporary s3cmd config file is created using
+`s3-publish-generate-s3cmd-config'.
 The s3cmd command is run:
   s3cmd --config TMP_CONFIG [--acl-public] put FILE s3://BUCKET/KEY
 If the upload is successful and the profile’s :public-acl is non-nil,
@@ -281,7 +283,9 @@ If the upload fails, it signals an error with the error message."
          (host-base (replace-regexp-in-string "/$" "" host-base))
          ;; Remove the bucket subdomain if it exactly matches.
          (host-base (if (string-prefix-p (concat bucket ".") host-base)
-                        (replace-regexp-in-string (concat "^" (regexp-quote (concat bucket "."))) "" host-base)
+                        (replace-regexp-in-string
+                         (concat "^" (regexp-quote (concat bucket ".")))
+                         "" host-base)
                       host-base))
          (s3-uri (format "s3://%s/%s" bucket key))
          ;; Conditionally include --acl-public if :public-acl is non-nil.
@@ -295,7 +299,8 @@ If the upload fails, it signals an error with the error message."
          exit-code)
     (unwind-protect
         (progn
-          (setq exit-code (apply 'call-process "s3cmd" nil output-buffer nil args))
+          (setq exit-code
+                (apply 'call-process "s3cmd" nil output-buffer nil args))
           (if (zerop exit-code)
               (if (plist-get profile :public-acl)
                   (format "https://%s.%s/%s" bucket host-base key)
@@ -320,10 +325,15 @@ The URL is copied to the kill ring."
          (html-file (if (file-symlink-p html-file)
                         (file-truename html-file)
                       html-file))
-         (profile-names (mapcar (lambda (p) (plist-get p :name)) s3-publish-profiles))
-         (default (if (member "default" profile-names) "default" (car profile-names)))
-         (profile-name (completing-read "Select S3 profile: " profile-names nil t nil nil default))
-         (profile (s3-publish-get-credentials (s3-publish-get-profile profile-name)))
+         (profile-names
+          (mapcar (lambda (p) (plist-get p :name)) s3-publish-profiles))
+         (default
+          (if (member "default" profile-names) "default" (car profile-names)))
+         (profile-name
+          (completing-read "Select S3 profile: "
+                           profile-names nil t nil nil default))
+         (profile
+          (s3-publish-get-credentials (s3-publish-get-profile profile-name)))
          (upload-result (s3-publish-upload-file html-file profile)))
     (kill-new upload-result)
     (message "%s" upload-result)))
@@ -347,8 +357,10 @@ the kill ring and displayed in the echo area."
     ;; Prompt for a profile.
     (let* ((profile-names (mapcar (lambda (p) (plist-get p :name))
                                   s3-publish-profiles))
-           (profile-name (completing-read "Select S3 profile: " profile-names nil t))
-           (profile (s3-publish-get-credentials (s3-publish-get-profile profile-name)))
+           (profile-name
+            (completing-read "Select S3 profile: " profile-names nil t))
+           (profile
+            (s3-publish-get-credentials (s3-publish-get-profile profile-name)))
            (upload-result (s3-publish-upload-file temp-file profile))
            (url (if (stringp upload-result) upload-result upload-result)))
       (delete-file temp-file)
@@ -370,10 +382,15 @@ and displayed in the echo area."
     (with-temp-file temp-file
       (insert region-text))
     ;; Prompt for a profile.
-    (let* ((profile-names (mapcar (lambda (p) (plist-get p :name)) s3-publish-profiles))
-           (default (if (member "default" profile-names) "default" (car profile-names)))
-           (profile-name (completing-read "Select S3 profile: " profile-names nil t nil nil default))
-           (profile (s3-publish-get-credentials (s3-publish-get-profile profile-name)))
+    (let* ((profile-names
+            (mapcar (lambda (p) (plist-get p :name)) s3-publish-profiles))
+           (default
+            (if (member "default" profile-names) "default" (car profile-names)))
+           (profile-name
+            (completing-read "Select S3 profile: "
+                             profile-names nil t nil nil default))
+           (profile (s3-publish-get-credentials
+                     (s3-publish-get-profile profile-name)))
            (upload-result (s3-publish-upload-file temp-file profile))
            (url (if (stringp upload-result) upload-result upload-result)))
       (delete-file temp-file)
@@ -393,8 +410,10 @@ the bucket name and credentials. An error is signaled if no bucket is defined."
                                       (mapcar (lambda (p) (plist-get p :name))
                                               s3-publish-profiles)
                                       nil t)
-                     (read-string "Enter number of expiry days (leave blank to delete policy): ")))
-  (let* ((profile (s3-publish-get-credentials (s3-publish-get-profile profile-name)))
+               (read-string
+               "Enter number of expiry days (leave blank to delete policy): ")))
+  (let* ((profile
+          (s3-publish-get-credentials (s3-publish-get-profile profile-name)))
          (bucket (plist-get profile :bucket)))
     (unless bucket
       (error "No bucket defined for profile %s" profile-name))
@@ -414,7 +433,8 @@ the bucket name and credentials. An error is signaled if no bucket is defined."
           (if (zerop exit-code)
               (if (string= days-input "")
                   (message "Lifecycle policy deleted for bucket %s." bucket)
-                (message "Lifecycle policy set for bucket %s: objects expire after %s days"
+            (message
+             "Lifecycle policy set for bucket %s: objects expire after %s days"
                          bucket days-input))
             (with-current-buffer output-buffer
               (error "Error updating lifecycle policy: %s" (buffer-string))))
@@ -451,9 +471,12 @@ not directories before uploading them. The resulting URLs (one per line) are
 copied to the kill ring and displayed."
   (interactive)
   (let* ((files (dired-get-marked-files))
-         (profile-names (mapcar (lambda (p) (plist-get p :name)) s3-publish-profiles))
-         (profile-name (completing-read "Select S3 profile: " profile-names nil t))
-         (profile (s3-publish-get-credentials (s3-publish-get-profile profile-name)))
+         (profile-names
+          (mapcar (lambda (p) (plist-get p :name)) s3-publish-profiles))
+         (profile-name
+          (completing-read "Select S3 profile: " profile-names nil t))
+         (profile
+          (s3-publish-get-credentials (s3-publish-get-profile profile-name)))
          (result (s3-publish-upload-multiple-files files profile)))
     result))
 
@@ -461,10 +484,12 @@ copied to the kill ring and displayed."
   "Remove FILE from S3 using PROFILE without prompting.
 PROFILE is a plist that must include :bucket, :endpoint, :salt,
 and credentials (:access-key and :secret-key).
-This function generates FILE’s S3 key using `s3-publish-get-file-key' with PROFILE’s salt,
+This function generates FILE’s S3 key using
+`s3-publish-get-file-key' with PROFILE’s salt,
 creates a temporary s3cmd config file, and runs:
   s3cmd --config CONFIG del s3://BUCKET/KEY
-Returns the S3 URI if successful, or signals an error with the output from s3cmd."
+Returns the S3 URI if successful,
+or signals an error with the output from s3cmd."
   (let* ((salt (plist-get profile :salt))
          (key (s3-publish-get-file-key file salt))
          (bucket (plist-get profile :bucket))
@@ -475,7 +500,8 @@ Returns the S3 URI if successful, or signals an error with the output from s3cmd
          exit-code)
     (unwind-protect
         (progn
-          (setq exit-code (apply 'call-process "s3cmd" nil output-buffer nil args))
+          (setq exit-code
+                (apply 'call-process "s3cmd" nil output-buffer nil args))
           (if (zerop exit-code)
               (progn
                 (message "Successfully removed %s from S3" s3-uri)
@@ -489,9 +515,12 @@ Returns the S3 URI if successful, or signals an error with the output from s3cmd
 Prompts for an S3 profile (from `s3-publish-profiles') to use for removal.
 Returns the S3 URI of the removed file if successful."
   (interactive "fFile to remove from S3: ")
-  (let* ((profile-names (mapcar (lambda (p) (plist-get p :name)) s3-publish-profiles))
-         (profile-name (completing-read "Select S3 profile: " profile-names nil t))
-         (profile (s3-publish-get-credentials (s3-publish-get-profile profile-name))))
+  (let* ((profile-names
+          (mapcar (lambda (p) (plist-get p :name)) s3-publish-profiles))
+         (profile-name
+          (completing-read "Select S3 profile: " profile-names nil t))
+         (profile
+          (s3-publish-get-credentials (s3-publish-get-profile profile-name))))
     (s3-publish--remove-file-internal file profile)))
 
 
@@ -521,18 +550,23 @@ copied to the kill ring, and displayed."
                         (and (file-exists-p f)
                              (not (file-directory-p f))))
                       files)
-      (error "One or more selected files do not exist or are not regular files"))
+      (error
+       "One or more selected files do not exist or are not regular files"))
     (let* ((profile-names (mapcar (lambda (p) (plist-get p :name))
                                   s3-publish-profiles))
            (profile-name (let ((sort-completions nil))
-                           (completing-read "Select S3 profile: " profile-names nil t)))
-           (profile (s3-publish-get-credentials (s3-publish-get-profile profile-name)))
+                           (completing-read
+                            "Select S3 profile: " profile-names nil t)))
+           (profile
+            (s3-publish-get-credentials (s3-publish-get-profile profile-name)))
            (results (mapcar (lambda (f)
                               (s3-publish--remove-file-internal f profile))
                             files))
            (result-str (string-join results "\n")))
       (kill-new result-str)
-      (message "Removed files. S3 URIs (one per line) copied to kill ring:\n%s" result-str)
+      (message
+       "Removed files. S3 URIs (one per line) copied to kill ring:\n%s"
+       result-str)
       result-str)))
 
 
