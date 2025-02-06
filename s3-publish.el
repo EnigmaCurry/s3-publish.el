@@ -595,9 +595,8 @@ copied to the kill ring, and displayed."
        "One or more selected files do not exist or are not regular files"))
     (let* ((profile-names (mapcar (lambda (p) (plist-get p :name))
                                   s3-publish-profiles))
-           (profile-name (let ((sort-completions nil))
-                           (completing-read
-                            "Select S3 profile: " profile-names nil t)))
+           (profile-name (completing-read
+                            "Select S3 profile: " profile-names nil t))
            (profile
             (s3-publish-get-credentials (s3-publish-get-profile profile-name)))
            (results (mapcar (lambda (f)
