@@ -258,6 +258,47 @@ it is appended to the key."
              (ext (file-name-extension abs-path t))) ; t means include the dot
         (concat key ext)))))
 
+(defun s3-publish-generate-s3cmd-config (profile)
+  "Generate a temporary s3cmd config file from PROFILE.
+PROFILE should be a plist containing at least:
+  :access-key, :secret-key, :endpoint, and :bucket.
+The generated config file will have a [default] section with:
+  access_key = <access-key>
+  host_base = <host-base>
+  host_bucket = %(bucket)s.<host-base>
+  secret_key = <secret-key>
+  website_endpoint = http://%(bucket)s.<host-base>/
+If access-key or secret-key is nil, an error is signaled.
+The function removes the protocol, trailing slash, and a bucket subdomain
+if the endpoint starts with '<bucket>.'.
+Returns the path to the temporary config file."
+  (let* ((access-key (plist-get profile :access-key))
+         (secret-key (plist-get profile :secret-key))
+         (endpoint (plist-get profile :endpoint))
+         (bucket (plist-get profile :bucket)))
+    (unless (and access-key secret-key)
+     (error "Both :access-key and :secret-key must be provided in the profile"))
+    ;; Remove protocol (http:// or https://)
+    (let* ((host-base (replace-regexp-in-string "^https?://" "" endpoint))
+           ;; Remove any trailing slash.
+           (host-base (replace-regexp-in-string "/$" "" host-base))
+           ;; If host-base starts with "<bucket>.", remove that subdomain.
+           (host-base (if (string-prefix-p (concat bucket ".") host-base)
+               (replace-regexp-in-string
+                  (concat "^" (regexp-quote (concat bucket "."))) "" host-base)
+                        host-base))
+           (config-content (format "[default]
+access_key = %s
+host_base = %s
+host_bucket = %%(bucket)s.%s
+secret_key = %s
+website_endpoint = http://%%(bucket)s.%s/
+" access-key host-base host-base secret-key host-base))
+           (tmp-file (make-temp-file "s3cmd-config-" nil ".s3cfg")))
+      (with-temp-file tmp-file
+        (insert config-content))
+      tmp-file)))
+
 (defun s3-publish-upload-file (file profile)
   "Upload FILE to S3 using PROFILE.
 PROFILE is a plist that must include :bucket, :endpoint, and credentials
