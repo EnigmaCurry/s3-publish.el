@@ -175,6 +175,8 @@ You can publish multiple files at once from a dired buffer:
 
 ** Updating files
 
+
+
 The S3 keys and public URLs use a filename that is a hash of the local
 path of the file. This means that if you upload the same file twice,
 it will keep the same key/URL. However, there are two exceptions:

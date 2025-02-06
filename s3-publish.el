@@ -10,7 +10,7 @@
 ;; This file is not part of GNU Emacs.
 
 ;;; Commentary:
-
+;;
 ;; This enables publishing files (e.g., HTML) to S3 (compatible)
 ;; storage.
 
@@ -20,7 +20,6 @@
 (require 'auth-source)
 (require 'dired)
 (require 'ox-html)
-
 
 (defgroup s3-publish nil
   "Settings for publishing files to S3-compatible storage."
@@ -34,17 +33,20 @@ Each profile is an alist containing the following keys:
   - :endpoint   The domain of the S3-compatible endpoint (minus bucket name).
   - :bucket     The bucket name to which files will be published.
   - :public-acl A boolean indicating if the file is public.
+  - :salt       A random string used to salt file keys (generated when added).
 The auth-source machine name will be derived by prepending \"s3-publish-\" to
 the profile name.
 Example:
   ((:name \"default\"
      :endpoint \"s3.amazonaws.com\"
      :bucket \"my-bucket\"
-     :public-acl t)
+     :public-acl t
+     :salt \"1a2b3c4d\")
     (:name \"do-spaces\"
      :endpoint \"nyc3.digitaloceanspaces.com\"
      :bucket \"do-bucket\"
-     :public-acl nil))
+     :public-acl nil
+     :salt \"9e8f7d6c\"))
 "
   :group 's3-publish
   :type '(repeat
@@ -56,7 +58,7 @@ Example:
 (defun s3-publish-get-credentials (profile)
   "Retrieve S3 credentials for the given PROFILE.
 The PROFILE is expected to be a plist containing at least a :name key.
-The auth-source machine is derived as \"s3-publish-<profile-name>\".
+The auth-source machine name will be derived as \"s3-publish-<profile-name>\".
 Returns a new plist combining the original PROFILE
 with keys :access-key and :secret-key.
 Signals an error if no credentials are found."
@@ -86,9 +88,6 @@ an error is signaled."
       (error "No s3-publish profile found with name: %s" name))
     profile))
 
-
-
-
 (defvar s3-publish-profiles-buffer "*s3-publish-profiles*"
   "Buffer name for displaying s3-publish profiles.")
 
@@ -101,22 +100,23 @@ If the buffer does not exist, it is created."
       (if s3-publish-profiles
           (dolist (p s3-publish-profiles)
             (insert (format
-                     "Name: %s\nEndpoint: %s\nBucket: %s\nPublic ACL: %s\n\n"
-                            (plist-get p :name)
-                            (plist-get p :endpoint)
-                            (plist-get p :bucket)
-                            (if (plist-get p :public-acl) "Yes" "No"))))
-        (insert "No s3-publish profiles defined."))
+                     "Name: %s\nEndpoint: %s\nBucket: %s\nPublic ACL: %s\nSalt: %s\n\n"
+                     (plist-get p :name)
+                     (plist-get p :endpoint)
+                     (plist-get p :bucket)
+                     (if (plist-get p :public-acl) "Yes" "No")
+                     (or (plist-get p :salt) "Not set")))
+          (insert "No s3-publish profiles defined."))
       (goto-char (point-min))
       (read-only-mode 1)))
-  (display-buffer s3-publish-profiles-buffer))
+  (display-buffer s3-publish-profiles-buffer)))
 
 (defun s3-publish-manage-profiles ()
   "Manage s3-publish profiles interactively.
 Immediately displays a list of profiles in a dedicated buffer.
 Then, prompts you to Add, Edit, Remove, or Done.
 Selecting Done exits the management session, closing the profiles window and
- killing the buffer."
+killing the buffer."
   (interactive)
   (s3-publish-refresh-profiles-buffer)
   (catch 'done
@@ -146,23 +146,28 @@ Selecting Done exits the management session, closing the profiles window and
       (with-output-to-temp-buffer "*s3-publish-profiles*"
         (dolist (p s3-publish-profiles)
           (princ (format
-                  "Name: %s\nEndpoint: %s\nBucket: %s\nPublic ACL: %s\n\n"
-                         (plist-get p :name)
-                         (plist-get p :endpoint)
-                         (plist-get p :bucket)
-                         (if (plist-get p :public-acl) "Yes" "No")))))
+                  "Name: %s\nEndpoint: %s\nBucket: %s\nPublic ACL: %s\nSalt: %s\n\n"
+                  (plist-get p :name)
+                  (plist-get p :endpoint)
+                  (plist-get p :bucket)
+                  (if (plist-get p :public-acl) "Yes" "No")
+                  (or (plist-get p :salt) "Not set")))))
     (message "No s3-publish profiles defined.")))
 
 (defun s3-publish-add-profile ()
-  "Add a new s3-publish profile interactively."
+  "Add a new s3-publish profile interactively.
+Generates a random salt (an 8-character string) and stores it with the profile."
   (let* ((name (read-string "Profile name: "))
          (endpoint (read-string "Endpoint URL: "))
          (bucket (read-string "Bucket name: "))
          (public-acl (y-or-n-p "Make files public? "))
+         (salt (substring (md5 (format "%s-%d" (current-time-string) (random)))
+                          0 32))
          (new-profile (list :name name
                             :endpoint endpoint
                             :bucket bucket
-                            :public-acl public-acl)))
+                            :public-acl public-acl
+                            :salt salt)))
     (setq s3-publish-profiles (append s3-publish-profiles (list new-profile)))
     (s3-publish-save-profiles)
     (message "Profile '%s' added." name)
@@ -199,10 +204,12 @@ Selecting Done exits the management session, closing the profiles window and
                (new-public-acl
                 (y-or-n-p (format "Make files public? (current: %s): "
                              (if (plist-get profile :public-acl) "Yes" "No"))))
+               ;; Retain the existing salt.
                (edited-profile (list :name name
                                      :endpoint new-endpoint
                                      :bucket new-bucket
-                                     :public-acl new-public-acl)))
+                                     :public-acl new-public-acl
+                                     :salt (plist-get profile :salt))))
           (setq s3-publish-profiles
                 (mapcar (lambda (p)
                           (if (string= (plist-get p :name) name)
@@ -218,14 +225,15 @@ Selecting Done exits the management session, closing the profiles window and
   "Persist the current value of `s3-publish-profiles` to the custom file."
   (customize-save-variable 's3-publish-profiles s3-publish-profiles))
 
-(defun s3-publish-get-file-key (file)
-  "Generate an S3 key for FILE path.
-The file's absolute path is hashed using MD5, then converted
-to a base-36 string.
+(defun s3-publish-get-file-key (file salt)
+  "Generate an S3 key for FILE using SALT.
+FILE's absolute path is first expanded, then concatenated with SALT.
+The resulting string is hashed using MD5, then converted to a base-36 string.
 Dashes are inserted every 5 characters. If the file has an extension,
 it is appended to the key."
   (let* ((abs-path (expand-file-name file))
-         (md5-hex (md5 abs-path))
+         (input (concat salt abs-path))
+         (md5-hex (md5 input))
          (hash-num (string-to-number md5-hex 16))
          (chars "0123456789abcdefghijklmnopqrstuvwxyz"))
     (cl-labels ((int-to-base36 (n)
@@ -240,8 +248,7 @@ it is appended to the key."
                         (i 0)
                         (len (length s)))
                     (while (< i len)
-                      (setq result
-                            (concat result (substring s i (min len (+ i n)))))
+                      (setq result (concat result (substring s i (min len (+ i n)))))
                       (setq i (+ i n))
                       (unless (>= i len)
                         (setq result (concat result "-"))))
@@ -251,54 +258,12 @@ it is appended to the key."
              (ext (file-name-extension abs-path t))) ; t means include the dot
         (concat key ext)))))
 
-
-(defun s3-publish-generate-s3cmd-config (profile)
-  "Generate a temporary s3cmd config file from PROFILE.
-PROFILE should be a plist containing at least:
-  :access-key, :secret-key, :endpoint, and :bucket.
-The generated config file will have a [default] section with:
-  access_key = <access-key>
-  host_base = <host-base>
-  host_bucket = %(bucket)s.<host-base>
-  secret_key = <secret-key>
-  website_endpoint = http://%(bucket)s.<host-base>/
-If access-key or secret-key is nil, an error is signaled.
-The function removes the protocol, trailing slash, and a bucket subdomain
-if the endpoint starts with '<bucket>.'.
-Returns the path to the temporary config file."
-  (let* ((access-key (plist-get profile :access-key))
-         (secret-key (plist-get profile :secret-key))
-         (endpoint (plist-get profile :endpoint))
-         (bucket (plist-get profile :bucket)))
-    (unless (and access-key secret-key)
-     (error "Both :access-key and :secret-key must be provided in the profile"))
-    ;; Remove protocol (http:// or https://)
-    (let* ((host-base (replace-regexp-in-string "^https?://" "" endpoint))
-           ;; Remove any trailing slash.
-           (host-base (replace-regexp-in-string "/$" "" host-base))
-           ;; If host-base starts with "<bucket>.", remove that subdomain.
-           (host-base (if (string-prefix-p (concat bucket ".") host-base)
-               (replace-regexp-in-string
-                  (concat "^" (regexp-quote (concat bucket "."))) "" host-base)
-                        host-base))
-           (config-content (format "[default]
-access_key = %s
-host_base = %s
-host_bucket = %%(bucket)s.%s
-secret_key = %s
-website_endpoint = http://%%(bucket)s.%s/
-" access-key host-base host-base secret-key host-base))
-           (tmp-file (make-temp-file "s3cmd-config-" nil ".s3cfg")))
-      (with-temp-file tmp-file
-        (insert config-content))
-      tmp-file)))
-
 (defun s3-publish-upload-file (file profile)
   "Upload FILE to S3 using PROFILE.
 PROFILE is a plist that must include :bucket, :endpoint, and credentials
-(:access-key and :secret-key).  The file’s key is generated using
-`s3-publish-get-file-key', and a temporary s3cmd config file is created
-using `s3-publish-generate-s3cmd-config'.
+(:access-key and :secret-key), and now also :salt.
+The file’s key is generated using `s3-publish-get-file-key' with the profile’s salt,
+and a temporary s3cmd config file is created using `s3-publish-generate-s3cmd-config'.
 The s3cmd command is run:
   s3cmd --config TMP_CONFIG [--acl-public] put FILE s3://BUCKET/KEY
 If the upload is successful and the profile’s :public-acl is non-nil,
@@ -306,7 +271,8 @@ this function returns the public URL for the file (constructed as
   https://BUCKET.HOST_BASE/KEY).
 If :public-acl is nil, it returns the S3 URI (e.g., s3://BUCKET/KEY).
 If the upload fails, it signals an error with the error message."
-  (let* ((key (s3-publish-get-file-key file))
+  (let* ((salt (plist-get profile :salt))
+         (key (s3-publish-get-file-key file salt))
          (s3cmd-config (s3-publish-generate-s3cmd-config profile))
          (bucket (plist-get profile :bucket))
          (endpoint (plist-get profile :endpoint))
@@ -315,8 +281,7 @@ If the upload fails, it signals an error with the error message."
          (host-base (replace-regexp-in-string "/$" "" host-base))
          ;; Remove the bucket subdomain if it exactly matches.
          (host-base (if (string-prefix-p (concat bucket ".") host-base)
-                  (replace-regexp-in-string
-                   (concat "^" (regexp-quote (concat bucket "."))) "" host-base)
+                        (replace-regexp-in-string (concat "^" (regexp-quote (concat bucket "."))) "" host-base)
                       host-base))
          (s3-uri (format "s3://%s/%s" bucket key))
          ;; Conditionally include --acl-public if :public-acl is non-nil.
@@ -330,8 +295,7 @@ If the upload fails, it signals an error with the error message."
          exit-code)
     (unwind-protect
         (progn
-          (setq exit-code
-                (apply 'call-process "s3cmd" nil output-buffer nil args))
+          (setq exit-code (apply 'call-process "s3cmd" nil output-buffer nil args))
           (if (zerop exit-code)
               (if (plist-get profile :public-acl)
                   (format "https://%s.%s/%s" bucket host-base key)
@@ -356,15 +320,10 @@ The URL is copied to the kill ring."
          (html-file (if (file-symlink-p html-file)
                         (file-truename html-file)
                       html-file))
-         (profile-names
-          (mapcar (lambda (p) (plist-get p :name)) s3-publish-profiles))
-         (default (if
-               (member "default" profile-names) "default" (car profile-names)))
-         (profile-name
-          (completing-read "Select S3 profile: "
-                           profile-names nil t nil nil default))
-         (profile (s3-publish-get-credentials
-                   (s3-publish-get-profile profile-name)))
+         (profile-names (mapcar (lambda (p) (plist-get p :name)) s3-publish-profiles))
+         (default (if (member "default" profile-names) "default" (car profile-names)))
+         (profile-name (completing-read "Select S3 profile: " profile-names nil t nil nil default))
+         (profile (s3-publish-get-credentials (s3-publish-get-profile profile-name)))
          (upload-result (s3-publish-upload-file html-file profile)))
     (kill-new upload-result)
     (message "%s" upload-result)))
@@ -388,17 +347,14 @@ the kill ring and displayed in the echo area."
     ;; Prompt for a profile.
     (let* ((profile-names (mapcar (lambda (p) (plist-get p :name))
                                   s3-publish-profiles))
-           (profile-name
-            (completing-read "Select S3 profile: " profile-names nil t))
-           (profile
-            (s3-publish-get-credentials (s3-publish-get-profile profile-name)))
+           (profile-name (completing-read "Select S3 profile: " profile-names nil t))
+           (profile (s3-publish-get-credentials (s3-publish-get-profile profile-name)))
            (upload-result (s3-publish-upload-file temp-file profile))
            (url (if (stringp upload-result) upload-result upload-result)))
       (delete-file temp-file)
       (kill-new url)
       (message "%s" url)
       url)))
-
 
 (defun s3-publish-region (start end)
   "Publish the currently selected region to S3.
@@ -410,23 +366,16 @@ and displayed in the echo area."
   (unless (use-region-p)
     (error "No region selected"))
   (let* ((temp-file (make-temp-file "s3-publish-region-" nil ".txt"))
-         ;; Write the region to the temporary file.
          (region-text (buffer-substring-no-properties start end)))
     (with-temp-file temp-file
       (insert region-text))
     ;; Prompt for a profile.
-    (let* ((profile-names
-            (mapcar (lambda (p) (plist-get p :name)) s3-publish-profiles))
-           (default (if
-               (member "default" profile-names) "default" (car profile-names)))
-           (profile-name
-            (completing-read "Select S3 profile: "
-                             profile-names nil t nil nil default))
-           (profile (s3-publish-get-credentials
-                     (s3-publish-get-profile profile-name)))
+    (let* ((profile-names (mapcar (lambda (p) (plist-get p :name)) s3-publish-profiles))
+           (default (if (member "default" profile-names) "default" (car profile-names)))
+           (profile-name (completing-read "Select S3 profile: " profile-names nil t nil nil default))
+           (profile (s3-publish-get-credentials (s3-publish-get-profile profile-name)))
            (upload-result (s3-publish-upload-file temp-file profile))
            (url (if (stringp upload-result) upload-result upload-result)))
-      ;; Clean up temporary file.
       (delete-file temp-file)
       (kill-new url)
       (message "%s" url)
@@ -444,9 +393,8 @@ the bucket name and credentials. An error is signaled if no bucket is defined."
                                       (mapcar (lambda (p) (plist-get p :name))
                                               s3-publish-profiles)
                                       nil t)
-  (read-string "Enter number of expiry days (leave blank to delete policy): ")))
-  (let* ((profile (s3-publish-get-credentials
-                   (s3-publish-get-profile profile-name)))
+                     (read-string "Enter number of expiry days (leave blank to delete policy): ")))
+  (let* ((profile (s3-publish-get-credentials (s3-publish-get-profile profile-name)))
          (bucket (plist-get profile :bucket)))
     (unless bucket
       (error "No bucket defined for profile %s" profile-name))
@@ -466,9 +414,8 @@ the bucket name and credentials. An error is signaled if no bucket is defined."
           (if (zerop exit-code)
               (if (string= days-input "")
                   (message "Lifecycle policy deleted for bucket %s." bucket)
-               (message
-              "Lifecycle policy set for bucket %s: objects expire after %s days"
-                 bucket days-input))
+                (message "Lifecycle policy set for bucket %s: objects expire after %s days"
+                         bucket days-input))
             (with-current-buffer output-buffer
               (error "Error updating lifecycle policy: %s" (buffer-string))))
         (kill-buffer output-buffer)))))
@@ -504,30 +451,22 @@ not directories before uploading them. The resulting URLs (one per line) are
 copied to the kill ring and displayed."
   (interactive)
   (let* ((files (dired-get-marked-files))
-         (profile-name (completing-read "Select S3 profile: "
-                                        (mapcar (lambda (p) (plist-get p :name))
-                                                s3-publish-profiles)
-                                        nil t))
-         (profile (s3-publish-get-credentials
-                   (s3-publish-get-profile profile-name)))
+         (profile-names (mapcar (lambda (p) (plist-get p :name)) s3-publish-profiles))
+         (profile-name (completing-read "Select S3 profile: " profile-names nil t))
+         (profile (s3-publish-get-credentials (s3-publish-get-profile profile-name)))
          (result (s3-publish-upload-multiple-files files profile)))
     result))
 
-(defun s3-publish-remove-file (file)
-  "Remove FILE from S3.
-FILE’s S3 key is generated using `s3-publish-get-file-key'.
-The function prompts for an S3 profile (from `s3-publish-profiles')
-to use for removal. It then generates a temporary s3cmd config file
-(with credentials) and runs:
+(defun s3-publish--remove-file-internal (file profile)
+  "Remove FILE from S3 using PROFILE without prompting.
+PROFILE is a plist that must include :bucket, :endpoint, :salt,
+and credentials (:access-key and :secret-key).
+This function generates FILE’s S3 key using `s3-publish-get-file-key' with PROFILE’s salt,
+creates a temporary s3cmd config file, and runs:
   s3cmd --config CONFIG del s3://BUCKET/KEY
-If the removal is successful, a success message (and the S3 URI) is returned.
-If the removal fails, an error is signaled with the output from s3cmd."
-  (interactive "fFile to remove from S3: ")
-  (let* ((profile-names (mapcar (lambda (p) (plist-get p :name))
-                                s3-publish-profiles))
-         (profile-name (completing-read "Select S3 profile: " profile-names nil t))
-         (profile (s3-publish-get-credentials (s3-publish-get-profile profile-name)))
-         (key (s3-publish-get-file-key file))
+Returns the S3 URI if successful, or signals an error with the output from s3cmd."
+  (let* ((salt (plist-get profile :salt))
+         (key (s3-publish-get-file-key file salt))
          (bucket (plist-get profile :bucket))
          (s3-uri (format "s3://%s/%s" bucket key))
          (s3cmd-config (s3-publish-generate-s3cmd-config profile))
@@ -545,6 +484,17 @@ If the removal fails, an error is signaled with the output from s3cmd."
               (error "Error removing file from S3: %s" (buffer-string)))))
       (kill-buffer output-buffer))))
 
+(defun s3-publish-remove-file (file)
+  "Interactively remove FILE from S3.
+Prompts for an S3 profile (from `s3-publish-profiles') to use for removal.
+Returns the S3 URI of the removed file if successful."
+  (interactive "fFile to remove from S3: ")
+  (let* ((profile-names (mapcar (lambda (p) (plist-get p :name)) s3-publish-profiles))
+         (profile-name (completing-read "Select S3 profile: " profile-names nil t))
+         (profile (s3-publish-get-credentials (s3-publish-get-profile profile-name))))
+    (s3-publish--remove-file-internal file profile)))
+
+
 (defun s3-publish-remove-buffer ()
   "Remove the file associated with the current buffer from S3.
 This function calls `s3-publish-remove-file' on the current buffer's file path.
@@ -556,9 +506,34 @@ If the buffer is not visiting a file, it signals an error."
       (error "Current buffer is not visiting a file"))))
 
 
-;;(s3-publish-get-credentials (s3-publish-get-profile "org-tmp"))
-;;(s3-publish-generate-key "/asdf.txt")
-;;(s3-publish-generate-s3cmd-config
-;;   (s3-publish-get-credentials (s3-publish-get-profile "org-tmp")))
+
+(defun s3-publish-dired-remove-files ()
+  "In Dired, remove the marked files from S3.
+The function retrieves the marked files, then prompts for an S3 profile
+(from `s3-publish-profiles') once. It validates that all files exist and are
+not directories. Each file is then removed using the internal removal function.
+All resulting S3 URIs (one per file) are concatenated (one per line),
+copied to the kill ring, and displayed."
+  (interactive)
+  (let* ((files (dired-get-marked-files)))
+    ;; Validate that every file exists and is not a directory.
+    (unless (cl-every (lambda (f)
+                        (and (file-exists-p f)
+                             (not (file-directory-p f))))
+                      files)
+      (error "One or more selected files do not exist or are not regular files"))
+    (let* ((profile-names (mapcar (lambda (p) (plist-get p :name))
+                                  s3-publish-profiles))
+           (profile-name (let ((sort-completions nil))
+                           (completing-read "Select S3 profile: " profile-names nil t)))
+           (profile (s3-publish-get-credentials (s3-publish-get-profile profile-name)))
+           (results (mapcar (lambda (f)
+                              (s3-publish--remove-file-internal f profile))
+                            files))
+           (result-str (string-join results "\n")))
+      (kill-new result-str)
+      (message "Removed files. S3 URIs (one per line) copied to kill ring:\n%s" result-str)
+      result-str)))
+
 
 (provide 's3-publish)
