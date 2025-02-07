@@ -12,15 +12,21 @@ You can declare the dependency in your config with use-package +
 [[https://github.com/radian-software/straight.el][straight.el]], and it will pull it directly from this git repository:
 
 #+begin_src emacs-lisp
-(use-package
-  s3-publish
-  :straight
-  (s3-publish
-   :type
-   git
-   :repo
-   "https://github.com/EnigmaCurry/s3-publish.el.git"))
+  (use-package s3-publish
+    :straight
+    (s3-publish
+     :type git
+     :repo "https://github.com/EnigmaCurry/s3-publish.el.git")
+     ;;; If you're using general.el, set a keybinding this way:
+     ;; :general
+     ;; ("C-c p" 's3-publish)
+    )
+
+  ;;; If you're not using general.el, set a keybinding this way:
+  ;;(global-set-key (kbd "C-c p") 's3-publish)
 #+end_src
+
+(See [[https://github.com/noctuid/general.el][general.el]] for declarative keybindings in use-package)
 
 ** Configuration
 
@@ -119,7 +125,6 @@ secure than this plain authinfo file, including:
 To set these up is left as an exercise to the reader.
 
 ** Usage
-
 *** Publish buffer
 
 You can publish your current buffer:
@@ -172,6 +177,47 @@ You can publish multiple files at once from a dired buffer:
  * All of the URLs will be printed in the minibuffer and copied to
    =kill-ring=.
  * List of URLs output are separated by newlines.
+
+*** Publish what I mean
+
+The =s3-publish= command automatically detects your current editing
+context and dispatches the appropriate S3 publishing action (Do What I
+Mean). Its behavior is determined by the following priorities:
+
+- **Region selected:**
+
+  If you have an active region, the command calls =s3-publish-region=
+  to upload the selected text to S3.
+
+- **In org-mode buffer:**
+  - Without a prefix argument, it exports your Org buffer to HTML and
+    uploads it using =s3-publish-org-buffer=.
+  - With a universal (prefix) argument (e.g., =C-u M-x s3-publish=),
+    it removes the file associated with the Org buffer from S3 by
+    calling =s3-publish-remove-file=.
+
+- **In dired buffer:**
+  - Without a prefix argument, it uploads the marked files using
+    =s3-publish-dired-upload-files=.
+  - With a prefix argument, it removes the marked files from S3 using
+    =s3-publish-dired-remove-files=.
+
+- **Other buffers:**
+  - Without a prefix argument, the entire buffer is published using
+    =s3-publish-buffer=.
+  - With a prefix argument, it removes the file backing the current
+    buffer from S3 by invoking =s3-publish-remove-file=.
+
+To make this functionality even more accessible, you can bind it to a
+convenient key sequence. For example, to bind it to =C-c p=, add the
+following to your Emacs configuration:
+
+#+BEGIN_SRC emacs-lisp
+  (global-set-key (kbd "C-c p") 's3-publish)
+#+END_SRC
+
+This key binding lets you quickly invoke the context-sensitive
+publishing command from anywhere within Emacs.
 
 ** Updating files
 

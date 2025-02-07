@@ -693,4 +693,44 @@ At the end, prints how many objects were deleted."
       (message "Deleted %d object(s) from S3" (length results))
       (length results))))
 
+(defun s3-publish (&optional arg)
+  "Publish to S3 in a context-aware (DWIM) way.
+The dispatch priorities are:
+1. If a region is active, run `s3-publish-region' on the selected region.
+2. If the current buffer is in org-mode:
+   - Without a universal argument, run `s3-publish-org-buffer'.
+   - With a universal argument, run `s3-publish-remove-file' using the file backing the buffer.
+3. If the current buffer is in dired-mode:
+   - Without a universal argument, run `s3-publish-dired-upload-files'.
+   - With a universal argument, run `s3-publish-dired-remove-files'.
+4. Otherwise:
+   - Without a universal argument, run `s3-publish-buffer'.
+   - With a universal argument, run `s3-publish-remove-file' using the file backing the buffer.
+ARG is the raw prefix argument."
+  (interactive "P")
+  (cond
+   ;; Priority 1: Region is selected.
+   ((use-region-p)
+    (s3-publish-region (region-beginning) (region-end)))
+   ;; Priority 2: Org-mode buffer.
+   ((derived-mode-p 'org-mode)
+    (if arg
+        (if buffer-file-name
+            (s3-publish-remove-file buffer-file-name)
+          (error "Current org buffer is not visiting a file"))
+      (s3-publish-org-buffer)))
+   ;; Priority 3: Dired buffer.
+   ((derived-mode-p 'dired-mode)
+    (if arg
+        (s3-publish-dired-remove-files)
+      (s3-publish-dired-upload-files)))
+   ;; Priority 4: Any other buffer.
+   (t
+    (if arg
+        (if buffer-file-name
+            (s3-publish-remove-file buffer-file-name)
+          (error "Current buffer is not visiting a file"))
+      (s3-publish-buffer)))))
+
+
 (provide 's3-publish)
