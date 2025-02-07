@@ -1,7 +1,19 @@
 #+title: Publish to S3 from Emacs
 
-This is an Emacs package that publishes files to S3 (AWS S3,
-DigitalOcean spaces, etc.)
+This is an Emacs package that quickly publishes any buffer, region, or
+file to S3 (AWS S3, DigitalOcean spaces, etc.).
+
+The intended purpose is for easily sharing temporary files on the web,
+using S3 as a paste-bin service. The object keys of the uploaded files
+will be renamed with a salted hash of the path + file extension, so
+the URLs are serviceable, but not really that pretty:
+
+: https://my-bucket.my-s3-provider/c6ej4-zk2ah-vvjq8-7w244-9bjxp.txt
+
+This long URL is fine if you're just copying and pasting the link into
+a chat message. Since the hash is salted, it is not practical to guess
+what it is, therefore the contents are only accessible to those you
+share the unique URL with.
 
 ** Installation
 
