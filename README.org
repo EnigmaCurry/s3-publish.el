@@ -15,6 +15,11 @@ a chat message. Since the hash is salted, it is not practical to guess
 what it is, therefore the contents are only accessible to those you
 share the unique URL with.
 
+** Dependencies
+
+This package requires =s3cmd=, which can be installed via your OS
+package manager.
+
 ** Installation
 
 This package is not on MELPA (yet). The package is self-contained in
