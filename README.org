@@ -23,7 +23,7 @@ package manager.
 ** Installation
 
 This package is not on MELPA (yet). The package is self-contained in
-one file: =s3-publish.el=.
+one file: [[https://github.com/EnigmaCurry/s3-publish.el/blob/master/s3-publish.el][s3-publish.el]].
 
 You can declare the dependency in your config with use-package +
 [[https://github.com/radian-software/straight.el][straight.el]], and it will pull it directly from this git repository:
