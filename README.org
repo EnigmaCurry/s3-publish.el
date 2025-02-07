@@ -187,12 +187,29 @@ it will keep the same key/URL. However, there are two exceptions:
 Both of these create temporary files with random names in order to
 export them. Therefore these will always make new S3 keys.
 
+** Removing URLs
+
+You can remove the objects by supplying the URLs:
+
+ * =M-x s3-publish-remove-urls=
+
+You may enter URLs to delete, one per line.
+
+You may also remove files from dired mode:
+
+ * Mark files in dired mode buffer.
+ * =M-x s3-publish-dired-remove-files=
+
+This will delete the remote objects for the given files (if they
+exist). It will not remove them locally.
+
 ** Lifecycle
 
-You can set the S3 lifecycle of the bucket to let objects expire. You
-will usually need an increased permission level to perform this action
-(e.g. on DigitalOcean spaces you must select the =All permissions=
-option, which gives full access to ALL your buckets.)
+You can set the S3 lifecycle of the bucket to let objects expire
+automatically. You will usually need an increased API permission level
+to perform this action (e.g. on DigitalOcean spaces you must select
+the =All permissions= option, which gives full access to ALL your
+buckets.)
 
  * =M-x s3-publish-bucket-lifecycle=
  * Select the profile to manage.
