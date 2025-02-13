@@ -351,33 +351,69 @@ If the upload fails, it signals an error with the error message."
       (kill-buffer output-buffer))))
 
 (defun s3-publish-org-buffer ()
-  "Export the current Org buffer to HTML, upload it to S3,
-and copy the URL to the kill ring.
-The function prompts for an S3 profile (from `s3-publish-profiles`) to
-use for the upload.
-It always returns a URL: if the profile’s :public-acl is non-nil,
-it returns a public URL,
-otherwise it returns an s3://BUCKET/KEY URL.
-The URL is copied to the kill ring."
+  "Export the current Org buffer to HTML and upload it to S3.
+Before exporting, save the buffer and back up the original .org file to S3.
+Both files share the same key (computed from the org file and profile salt)
+with only their extensions differing. Only the HTML file URL is displayed
+and copied to the kill ring."
   (interactive)
-  ;; Export current Org buffer to an HTML file.
-  (let* ((html-file (org-html-export-to-html))
-         ;; Resolve symlink if html-file is a symlink.
-         (html-file (if (file-symlink-p html-file)
-                        (file-truename html-file)
-                      html-file))
-         (profile-names
-          (mapcar (lambda (p) (plist-get p :name)) s3-publish-profiles))
-         (default
-          (if (member "default" profile-names) "default" (car profile-names)))
-         (profile-name
-          (completing-read "Select S3 profile: "
-                           profile-names nil t nil nil default))
-         (profile
-          (s3-publish-get-credentials (s3-publish-get-profile profile-name)))
-         (upload-result (s3-publish-upload-file html-file profile)))
-    (kill-new upload-result)
-    (message "%s" upload-result)))
+  ;; Save the current buffer if modified.
+  (when (and (buffer-file-name) (buffer-modified-p))
+    (save-buffer))
+  (let* ((org-file (buffer-file-name))
+         (profile-names (mapcar (lambda (p) (plist-get p :name))
+                                s3-publish-profiles))
+         (default (if (member "default" profile-names)
+                      "default"
+                    (car profile-names)))
+         (profile-name (completing-read "Select S3 profile: " profile-names nil t nil nil default))
+         (profile (s3-publish-get-credentials (s3-publish-get-profile profile-name)))
+         (salt (plist-get profile :salt))
+         ;; Compute the full key based on the org file and salt.
+         (full-key (s3-publish-get-file-key org-file salt))
+         (base-key (file-name-sans-extension full-key))
+         (org-key (concat base-key ".org"))
+         (html-key (concat base-key ".html")))
+    (cl-labels ((upload-with-key (file profile key)
+                  (let* ((s3cmd-config (s3-publish-generate-s3cmd-config profile))
+                         (bucket (plist-get profile :bucket))
+                         (endpoint (plist-get profile :endpoint))
+                         (host-base (replace-regexp-in-string "^https?://" "" endpoint))
+                         (host-base (replace-regexp-in-string "/$" "" host-base))
+                         (host-base (if (string-prefix-p (concat bucket ".") host-base)
+                                        (replace-regexp-in-string (concat "^" (regexp-quote (concat bucket "."))) "" host-base)
+                                      host-base))
+                         (s3-uri (format "s3://%s/%s" bucket key))
+                         (acl-args (if (plist-get profile :public-acl)
+                                       (list "--acl-public")
+                                     nil))
+                         (args (append (list "--config" s3cmd-config) acl-args
+                                       (list "put" file s3-uri)
+                                       (list "--add-header=x-amz-tagging: temp=temp")))
+                         (output-buffer (generate-new-buffer "*s3-publish-upload-output*"))
+                         exit-code)
+                    (unwind-protect
+                        (progn
+                          (setq exit-code (apply 'call-process "s3cmd" nil output-buffer nil args))
+                          (if (zerop exit-code)
+                              (if (plist-get profile :public-acl)
+                                  (format "https://%s.%s/%s" bucket host-base key)
+                                s3-uri)
+                            (with-current-buffer output-buffer
+                              (error "Upload failed: %s" (buffer-string)))))
+                      (kill-buffer output-buffer)))))
+      ;; Backup the original .org file using org-key.
+      (ignore-errors
+        (upload-with-key org-file profile org-key))
+      ;; Export to HTML and upload using html-key.
+      (let* ((html-file (org-html-export-to-html))
+             (html-file (if (file-symlink-p html-file)
+                            (file-truename html-file)
+                          html-file))
+             (html-url (upload-with-key html-file profile html-key)))
+        (kill-new html-url)
+        (message "%s" html-url)
+        html-url))))
 
 (defun s3-publish-buffer ()
   "Publish the entire current buffer to S3.
