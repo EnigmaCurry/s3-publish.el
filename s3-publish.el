@@ -354,8 +354,9 @@ If the upload fails, it signals an error with the error message."
   "Export the current Org buffer to HTML and upload it to S3.
 Before exporting, save the buffer and back up the original .org file to S3.
 Both files share the same key (computed from the org file and profile salt)
-with only their extensions differing. Only the HTML file URL is displayed
-and copied to the kill ring."
+with only their extensions differing.
+A link to the .org file is appended to the bottom of the HTML file.
+Only the HTML file URL is displayed and copied to the kill ring."
   (interactive)
   ;; Save the current buffer if modified.
   (when (and (buffer-file-name) (buffer-modified-p))
@@ -369,7 +370,7 @@ and copied to the kill ring."
          (profile-name (completing-read "Select S3 profile: " profile-names nil t nil nil default))
          (profile (s3-publish-get-credentials (s3-publish-get-profile profile-name)))
          (salt (plist-get profile :salt))
-         ;; Compute the full key based on the org file and salt.
+         ;; Compute the full key using the org file and salt, then strip its extension.
          (full-key (s3-publish-get-file-key org-file salt))
          (base-key (file-name-sans-extension full-key))
          (org-key (concat base-key ".org"))
@@ -402,18 +403,30 @@ and copied to the kill ring."
                             (with-current-buffer output-buffer
                               (error "Upload failed: %s" (buffer-string)))))
                       (kill-buffer output-buffer)))))
-      ;; Backup the original .org file using org-key.
-      (ignore-errors
-        (upload-with-key org-file profile org-key))
-      ;; Export to HTML and upload using html-key.
-      (let* ((html-file (org-html-export-to-html))
-             (html-file (if (file-symlink-p html-file)
-                            (file-truename html-file)
-                          html-file))
-             (html-url (upload-with-key html-file profile html-key)))
-        (kill-new html-url)
-        (message "%s" html-url)
-        html-url))))
+      ;; Backup the original .org file and capture its URL.
+      (let ((org-url (upload-with-key org-file profile org-key)))
+        ;; Export the Org buffer to an HTML file.
+        (let* ((html-file (org-html-export-to-html))
+               (html-file (if (file-symlink-p html-file)
+                              (file-truename html-file)
+                            html-file)))
+          ;; Insert a link to the .org file at the bottom of the HTML.
+          (with-temp-buffer
+            (insert-file-contents html-file)
+            (goto-char (point-max))
+            (if (search-backward "</body>" nil t)
+                (progn
+                  (goto-char (match-beginning 0))
+                  (insert (format "<div id=\"org-download\"><a href=\"%s\">View Org file source</a></div>\n" org-url)))
+              (progn
+                (goto-char (point-max))
+                (insert (format "\n<div id=\"org-download\"><a href=\"%s\">View Org file source</a></div>\n" org-url))))
+            (write-region (point-min) (point-max) html-file nil 'quiet))
+          ;; Upload the modified HTML file using html-key.
+          (let ((html-url (upload-with-key html-file profile html-key)))
+            (kill-new html-url)
+            (message "%s" html-url)
+            html-url))))))
 
 (defun s3-publish-buffer ()
   "Publish the entire current buffer to S3.
