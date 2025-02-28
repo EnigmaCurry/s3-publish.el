@@ -970,107 +970,185 @@ copied to the kill ring and displayed."
          (result (s3-publish-upload-multiple-files files profile)))
     result))
 
-;; Function to remove entries from feeds
 (defun s3-publish-remove-from-feed (profile file-url)
   "Remove an entry with FILE-URL from the RSS feed and HTML index for PROFILE.
 Returns t if successful, nil if no modification was needed."
-  ;; Only proceed if RSS feed is enabled for this profile
-  (when (plist-get profile :rss-feed)
-    (let ((current-feed (s3-publish-download-feed profile))
-          (current-index (s3-publish-download-html-index profile))
-          (modified nil))
+  (let ((any-updates nil))
+    ;; Only proceed if RSS feed is enabled for this profile
+    (when (plist-get profile :rss-feed)
+      (let ((current-feed (s3-publish-download-feed profile))
+            (current-index (s3-publish-download-html-index profile))
+            new-feed
+            new-index
+            feed-modified
+            index-modified)
 
-      ;; Only proceed if we have existing feeds to modify
-      (when (or current-feed current-index)
-        ;; Update the RSS feed
-        (when current-feed
-          (with-temp-buffer
-            (insert current-feed)
-            (goto-char (point-min))
-            ;; Look for items with the matching URL
-            (let ((case-fold-search t)
-                  (url-pattern (regexp-quote file-url)))
-              (when (re-search-forward (format "<item>\\(.*?\\)<link>.*?%s.*?</link>\\(.*?\\)</item>" url-pattern) nil t)
-                (replace-match "")
-                (setq modified t)
-                ;; Update the lastBuildDate
-                (goto-char (point-min))
-                (when (re-search-forward "<lastBuildDate>[^<]*</lastBuildDate>" nil t)
-                  (replace-match (format "<lastBuildDate>%s</lastBuildDate>"
-                                         (s3-publish-format-rfc822-date (current-time)))))))
-            (when modified
-              (setq current-feed (buffer-string)))))
+        ;; Only proceed if we have existing feeds to modify
+        (when (or current-feed current-index)
+          (message "Processing removal of %s from feeds..." file-url)
+          ;; Update the RSS feed
+          (when current-feed
+            (setq feed-modified nil)
+            (setq new-feed
+                  (with-temp-buffer
+                    (insert current-feed)
+                    (goto-char (point-min))
+                    ;; Look for items with the matching URL
+                    (let* ((case-fold-search t)
+                           (url-pattern (regexp-quote (string-trim file-url)))
+                           (found nil))
+                      ;; Try multiple patterns to match the URL
+                      (or
+                       ;; Try exact match
+                       (progn
+                         (goto-char (point-min))
+                         (when (re-search-forward (format "<link>%s</link>" url-pattern) nil t)
+                           (message "Found exact URL match in feed")
+                           (setq found t)))
+                       ;; Try match with extra whitespace
+                       (progn
+                         (goto-char (point-min))
+                         (when (re-search-forward (format "<link>[ \t\n]*%s[ \t\n]*</link>" url-pattern) nil t)
+                           (message "Found URL with whitespace in feed")
+                           (setq found t)))
+                       ;; Try match with URL in CDATA
+                       (progn
+                         (goto-char (point-min))
+                         (when (re-search-forward (format "<link><!\\[CDATA\\[%s\\]\\]></link>" url-pattern) nil t)
+                           (message "Found URL in CDATA in feed")
+                           (setq found t))))
+                      ;; If found, remove the entire item
+                      (when found
+                        ;; Move to start of the item containing this URL
+                        (let ((item-end (point))
+                              item-start)
+                          (if (re-search-backward "<item>" nil t)
+                              (setq item-start (point))
+                            (error "Found URL but couldn't locate start of item"))
+                          ;; Find the end of the item
+                          (goto-char item-end)
+                          (unless (re-search-forward "</item>" nil t)
+                            (error "Found URL but couldn't locate end of item"))
+                          (setq item-end (point))
 
-        ;; Update the HTML index
-        (when current-index
-          (with-temp-buffer
-            (insert current-index)
-            (goto-char (point-min))
-            ;; Look for entries with the matching URL
-            (let ((case-fold-search t)
-                  (url-pattern (regexp-quote file-url)))
-              (when (re-search-forward (format "<div class=\"entry\">\\(.*?\\)<a href=\".*?%s.*?\"\\(.*?\\)</div>\\s-*</div>" url-pattern) nil t)
-                (replace-match "")
-                (setq modified t)))
-            (when modified
-              (setq current-index (buffer-string)))))
-
-        ;; If we modified either feed, upload the updates
-        (when modified
-          ;; Save the updated feeds to temp files
-          (let ((feed-temp-file (when current-feed (make-temp-file "s3-publish-feed-" nil ".xml")))
-                (index-temp-file (when current-index (make-temp-file "s3-publish-index-" nil ".html"))))
-            (unwind-protect
-                (progn
-                  ;; Write feeds to temp files
-                  (when feed-temp-file
-                    (with-temp-file feed-temp-file (insert current-feed)))
-                  (when index-temp-file
-                    (with-temp-file index-temp-file (insert current-index)))
-
-                  ;; Upload the feeds to S3
-                  (let* ((s3cmd-config (s3-publish-generate-s3cmd-config profile))
-                         (bucket (plist-get profile :bucket))
-                         (acl-args (if (plist-get profile :public-acl)
-                                       (list "--acl-public")
-                                     nil))
-                         (output-buffer (generate-new-buffer "*s3-publish-upload-feed*")))
-
-                    (unwind-protect
-                        (progn
-                          ;; Upload the RSS feed if we modified it
-                          (when feed-temp-file
-                            (let* ((feed-s3-uri (format "s3://%s/%s" bucket s3-publish-rss-filename))
-                                   (feed-args (append (list "--config" s3cmd-config)
-                                                     acl-args
-                                                     (list "put" feed-temp-file feed-s3-uri)
-                                                     (list "--mime-type=application/rss+xml")))
-                                   (feed-exit-code (apply 'call-process "s3cmd" nil output-buffer nil feed-args)))
-                              (unless (zerop feed-exit-code)
-                                (with-current-buffer output-buffer
-                                  (error "Failed to upload updated RSS feed: %s" (buffer-string))))))
-
-                          ;; Upload the HTML index if we modified it
-                          (when index-temp-file
-                            (let* ((index-s3-uri (format "s3://%s/%s" bucket s3-publish-html-index-filename))
-                                   (index-args (append (list "--config" s3cmd-config)
-                                                      acl-args
-                                                      (list "put" index-temp-file index-s3-uri)
-                                                      (list "--mime-type=text/html")))
-                                   (index-exit-code (apply 'call-process "s3cmd" nil output-buffer nil index-args)))
-                              (unless (zerop index-exit-code)
-                                (with-current-buffer output-buffer
-                                  (error "Failed to upload updated HTML index: %s" (buffer-string))))))
-
-                          (message "Updated RSS feed and HTML index for %s - removed entry" (plist-get profile :name)))
-                      (kill-buffer output-buffer))))
-
-              ;; Clean up temp files
-              (when (and feed-temp-file (file-exists-p feed-temp-file))
-                (delete-file feed-temp-file))
-              (when (and index-temp-file (file-exists-p index-temp-file))
-                (delete-file index-temp-file))))
-          t)))))
+                          ;; Remove the entire item
+                          (delete-region item-start item-end)
+                          (setq feed-modified t)
+                          (message "Removed item from RSS feed")
+                          ;; Update the lastBuildDate
+                          (goto-char (point-min))
+                          (when (re-search-forward "<lastBuildDate>[^<]*</lastBuildDate>" nil t)
+                            (replace-match (format "<lastBuildDate>%s</lastBuildDate>"
+                                                   (s3-publish-format-rfc822-date (current-time))))))))
+                    (buffer-string))))
+          ;; Update the HTML index
+          (when current-index
+            (setq index-modified nil)
+            (setq new-index
+                  (with-temp-buffer
+                    (insert current-index)
+                    (goto-char (point-min))
+                    ;; Look for entries with the matching URL
+                    (let* ((case-fold-search t)
+                           (url-pattern (regexp-quote (string-trim file-url)))
+                           (found nil))
+                      ;; Try multiple patterns to match the URL
+                      (or
+                       ;; Try exact match in href
+                       (progn
+                         (goto-char (point-min))
+                         (when (re-search-forward (format "href=\"%s\"" url-pattern) nil t)
+                           (message "Found exact URL match in HTML index")
+                           (setq found t)))
+                       ;; Try match with extra whitespace
+                       (progn
+                         (goto-char (point-min))
+                         (when (re-search-forward (format "href=\"[ \t\n]*%s[ \t\n]*\"" url-pattern) nil t)
+                           (message "Found URL with whitespace in HTML index")
+                           (setq found t))))
+                      ;; If found, remove the entire entry
+                      (when found
+                        ;; Move to start of the entry containing this URL
+                        (let ((entry-end (point))
+                              entry-start)
+                          (if (re-search-backward "<div class=\"entry\">" nil t)
+                              (setq entry-start (point))
+                            (error "Found URL but couldn't locate start of entry"))
+                          ;; Find the end of the entry
+                          (goto-char entry-end)
+                          (unless (re-search-forward "</div>[ \t\n]*</div>" nil t)
+                            (error "Found URL but couldn't locate end of entry"))
+                          (setq entry-end (point))
+                          ;; Remove the entire entry
+                          (delete-region entry-start entry-end)
+                          (setq index-modified t)
+                          (message "Removed entry from HTML index"))))
+                    (buffer-string))))
+          ;; If we modified either feed, upload the updates
+          (if (or feed-modified index-modified)
+              (progn
+                (message "Feeds modified, uploading updates...")
+                ;; Save the updated feeds to temp files
+                (let ((feed-temp-file (when feed-modified
+                                        (make-temp-file "s3-publish-feed-" nil ".xml")))
+                      (index-temp-file (when index-modified
+                                         (make-temp-file "s3-publish-index-" nil ".html"))))
+                  (unwind-protect
+                      (progn
+                        ;; Write feeds to temp files
+                        (when feed-modified
+                          (with-temp-file feed-temp-file
+                            (insert new-feed)))
+                        (when index-modified
+                          (with-temp-file index-temp-file
+                            (insert new-index)))
+                        ;; Upload the feeds to S3
+                        (let* ((s3cmd-config (s3-publish-generate-s3cmd-config profile))
+                               (bucket (plist-get profile :bucket))
+                               (acl-args (if (plist-get profile :public-acl)
+                                             (list "--acl-public")
+                                           nil))
+                               (output-buffer (generate-new-buffer "*s3-publish-upload-feed*")))
+                          (unwind-protect
+                              (progn
+                                ;; Upload the RSS feed if we modified it
+                                (when feed-modified
+                                  (let* ((feed-s3-uri (format "s3://%s/%s" bucket s3-publish-rss-filename))
+                                         (feed-args (append (list "--config" s3cmd-config)
+                                                           acl-args
+                                                           (list "put" feed-temp-file feed-s3-uri)
+                                                           (list "--mime-type=application/rss+xml")))
+                                         (feed-exit-code (apply 'call-process "s3cmd" nil output-buffer nil feed-args)))
+                                    (if (zerop feed-exit-code)
+                                        (progn
+                                          (message "Updated RSS feed for %s - removed entry" (plist-get profile :name))
+                                          (setq any-updates t))
+                                      (with-current-buffer output-buffer
+                                        (error "Failed to upload updated RSS feed: %s" (buffer-string))))))
+                                ;; Upload the HTML index if we modified it
+                                (when index-modified
+                                  (let* ((index-s3-uri (format "s3://%s/%s" bucket s3-publish-html-index-filename))
+                                         (index-args (append (list "--config" s3cmd-config)
+                                                            acl-args
+                                                            (list "put" index-temp-file index-s3-uri)
+                                                            (list "--mime-type=text/html")))
+                                         (index-exit-code (apply 'call-process "s3cmd" nil output-buffer nil index-args)))
+                                    (if (zerop index-exit-code)
+                                        (progn
+                                          (message "Updated HTML index for %s - removed entry" (plist-get profile :name))
+                                          (setq any-updates t))
+                                      (with-current-buffer output-buffer
+                                        (error "Failed to upload updated HTML index: %s" (buffer-string)))))))
+                            (kill-buffer output-buffer))))
+                    ;; Clean up temp files
+                    (when (and feed-temp-file (file-exists-p feed-temp-file))
+                      (delete-file feed-temp-file))
+                    (when (and index-temp-file (file-exists-p index-temp-file))
+                      (delete-file index-temp-file)))))
+            ;; If we didn't modify anything, tell the user
+            (message "URL %s not found in any feeds - nothing to update" file-url)))))
+    ;; Return whether we updated anything
+    any-updates))
 
 (defun s3-publish--remove-file-internal (file profile)
   "Remove FILE from S3 using PROFILE without prompting.
@@ -1180,7 +1258,15 @@ At the end, prints how many objects were deleted."
                 (unless (string= profile-host-base url-host-base)
                   (error "Host mismatch: URL host '%s' does not match profile endpoint '%s'"
                          url-host profile-host-base))
-                ;; Construct the S3 URI and remove the file.
+                
+                ;; First, update the feed if enabled
+                (when (and (plist-get profile :rss-feed)
+                           (plist-get profile :public-acl))
+                  (let ((feed-updated (s3-publish-remove-from-feed profile url)))
+                    (when feed-updated
+                      (message "Updated feed to remove entry for %s" url))))
+                
+                ;; Then, construct the S3 URI and remove the file
                 (let* ((s3-uri (format "s3://%s/%s" profile-bucket key))
                        (s3cmd-config (s3-publish-generate-s3cmd-config profile))
                        (args (list "--config" s3cmd-config "del" s3-uri))
@@ -1194,10 +1280,6 @@ At the end, prints how many objects were deleted."
                                      nil output-buffer nil args))
                         (if (zerop exit-code)
                             (progn
-                              ;; Update RSS feed if enabled
-                              (when (and (plist-get profile :rss-feed)
-                                         (plist-get profile :public-acl))
-                                (s3-publish-remove-from-feed profile url))
                               (message "Successfully removed %s" s3-uri)
                               t)
                           (with-current-buffer output-buffer
@@ -1206,6 +1288,7 @@ At the end, prints how many objects were deleted."
             lines)))
       (message "Deleted %d object(s) from S3" (length results))
       (length results))))
+
 
 (defun s3-publish-remove-file (file)
   "Interactively remove FILE from S3.
