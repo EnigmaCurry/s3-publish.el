@@ -1258,14 +1258,12 @@ At the end, prints how many objects were deleted."
                 (unless (string= profile-host-base url-host-base)
                   (error "Host mismatch: URL host '%s' does not match profile endpoint '%s'"
                          url-host profile-host-base))
-                
                 ;; First, update the feed if enabled
                 (when (and (plist-get profile :rss-feed)
                            (plist-get profile :public-acl))
                   (let ((feed-updated (s3-publish-remove-from-feed profile url)))
                     (when feed-updated
                       (message "Updated feed to remove entry for %s" url))))
-                
                 ;; Then, construct the S3 URI and remove the file
                 (let* ((s3-uri (format "s3://%s/%s" profile-bucket key))
                        (s3cmd-config (s3-publish-generate-s3cmd-config profile))
@@ -1707,6 +1705,7 @@ they will be updated rather than duplicated."
               (delete-file feed-temp-file))
             (when (file-exists-p index-temp-file)
               (delete-file index-temp-file))))))))
+
 (defun s3-publish-s3fs-mount (profile-name mountpoint)
   "Mount the S3 bucket from PROFILE-NAME at MOUNTPOINT using s3fs.
 Checks if s3fs is installed, then mounts the bucket. The bucket
@@ -1771,52 +1770,6 @@ When the mount is successful, opens the mountpoint in a dired buffer."
       (with-current-buffer process-buffer
         (erase-buffer))
 
-      ;; Define a function to check if the mount is successful
-      (defun s3-publish--check-mount (mountpoint passwd-file bucket process-buffer)
-        "Check if the mountpoint is successfully mounted with s3fs.
-If the mount is successful, opens the mountpoint in a dired buffer."
-        (let ((mounted nil))
-          ;; Wait a bit for the mount to complete
-          (sleep-for 1)
-
-          ;; Check if mountpoint is now an s3fs mount
-          ;; Try multiple verification methods
-          (with-temp-buffer
-            ;; Method 1: Check mount command output
-            (call-process "mount" nil t nil)
-            (goto-char (point-min))
-            (when (re-search-forward (format "s3fs.*%s" (regexp-quote mountpoint)) nil t)
-              (setq mounted t))
-
-            ;; Method 2: Check if the mountpoint has s3fs filesystem type
-            (unless mounted
-              (erase-buffer)
-              (call-process "stat" nil t nil "-f" "-c" "%T" mountpoint)
-              (goto-char (point-min))
-              (when (or (looking-at "fuse\\.s3fs") 
-                        (looking-at "fuse"))
-                (setq mounted t)))
-
-            ;; Method 3: Check if we can list the directory (this might be slow)
-            (unless mounted
-              (condition-case nil
-                  (let ((files (directory-files mountpoint)))
-                    (when files
-                      (setq mounted t)))
-                (error nil))))
-
-          ;; Handle the verification result
-          (if mounted
-              (progn
-                (message "S3 bucket %s successfully mounted at %s" bucket mountpoint)
-                ;; Clean up the credentials file
-                (when (file-exists-p passwd-file)
-                  (delete-file passwd-file))
-                ;; Open the mountpoint in dired
-                (dired mountpoint))
-            (message "Warning: Cannot verify if s3fs mount succeeded. The mount may still be working. Check %s for details."
-                     (buffer-name process-buffer)))))
-
       ;; Start s3fs as an asynchronous process
       (make-process
        :name mount-process-name
@@ -1833,6 +1786,52 @@ If the mount is successful, opens the mountpoint in a dired buffer."
 
       ;; Return a message immediately
       (message "Starting s3fs mount process... Check %s for progress" 
+               (buffer-name process-buffer)))))
+
+;; Define a function to check if the mount is successful
+(defun s3-publish--check-mount (mountpoint passwd-file bucket process-buffer)
+  "Check if the mountpoint is successfully mounted with s3fs.
+If the mount is successful, opens the mountpoint in a dired buffer."
+  (let ((mounted nil))
+    ;; Wait a bit for the mount to complete
+    (sleep-for 1)
+
+    ;; Check if mountpoint is now an s3fs mount
+    ;; Try multiple verification methods
+    (with-temp-buffer
+      ;; Method 1: Check mount command output
+      (call-process "mount" nil t nil)
+      (goto-char (point-min))
+      (when (re-search-forward (format "s3fs.*%s" (regexp-quote mountpoint)) nil t)
+        (setq mounted t))
+
+      ;; Method 2: Check if the mountpoint has s3fs filesystem type
+      (unless mounted
+        (erase-buffer)
+        (call-process "stat" nil t nil "-f" "-c" "%T" mountpoint)
+        (goto-char (point-min))
+        (when (or (looking-at "fuse\\.s3fs") 
+                  (looking-at "fuse"))
+          (setq mounted t)))
+
+      ;; Method 3: Check if we can list the directory (this might be slow)
+      (unless mounted
+        (condition-case nil
+            (let ((files (directory-files mountpoint)))
+              (when files
+                (setq mounted t)))
+          (error nil))))
+
+    ;; Handle the verification result
+    (if mounted
+        (progn
+          (message "S3 bucket %s successfully mounted at %s" bucket mountpoint)
+          ;; Clean up the credentials file
+          (when (file-exists-p passwd-file)
+            (delete-file passwd-file))
+          ;; Open the mountpoint in dired
+          (dired mountpoint))
+      (message "Warning: Cannot verify if s3fs mount succeeded. The mount may still be working. Check %s for details."
                (buffer-name process-buffer)))))
 
 ;; Update the unmount function to close any dired buffers for the unmounted directory
