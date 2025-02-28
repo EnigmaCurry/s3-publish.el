@@ -24,8 +24,13 @@ make these URLs discoverable.
 
 ** Dependencies
 
-This package requires =s3cmd=, which can be installed via your OS
-package manager.
+This package requires the following external tools:
+
+ * =s3cmd= - Required for all S3 operations
+ * =s3fs= - Optional, required only for mounting S3 buckets as local filesystems
+ * =fusermount= - Optional, required for unmounting s3fs mounts
+
+These can be installed via your OS package manager.
 
 ** Installation
 
@@ -287,6 +292,47 @@ buckets.)
 
 If you don't have adequate permission, you will see the error in the
 mini buffer.
+
+** Mount S3 buckets as filesystems
+
+You can mount your S3 bucket as a local filesystem using s3fs:
+
+ * =M-x s3-publish-s3fs-mount=
+ * Select the S3 profile to mount
+ * Enter the local directory where you want to mount the bucket
+ * The bucket will be mounted at the specified location
+ * A dired buffer will open showing the contents of the mounted bucket
+
+To unmount the bucket:
+
+ * =M-x s3-publish-s3fs-unmount=
+ * Select the mounted directory
+ * The mount will be removed and any associated dired buffers closed
+
+This feature requires the =s3fs= command-line tool to be installed on your system.
+
+** Alternative credentials for admin operations
+
+Some operations like setting bucket lifecycle policies or configuring
+website hosting require elevated permissions. For these operations,
+s3-publish can prompt you to select alternative credentials.
+
+You can add additional credentials in your auth source with different
+machine names, and s3-publish will present them as options when
+performing operations that may require higher privileges.
+
+For example, you might have regular credentials for normal uploads:
+#+begin_src text
+machine s3-publish-gargleblaster login REGULAR_ACCESS_KEY secret REGULAR_SECRET_KEY
+#+end_src
+
+And separate admin credentials with full permissions:
+#+begin_src text
+machine s3-publish-admin login ADMIN_ACCESS_KEY secret ADMIN_SECRET_KEY
+#+end_src
+
+When performing administrative operations, s3-publish will give you
+the option to select an alternative credential from your auth source.
 
 ** License
 
