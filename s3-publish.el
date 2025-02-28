@@ -895,15 +895,19 @@ If DAYS-INPUT is non-empty, set the expiration policy using
 If DAYS-INPUT is empty, delete the lifecycle policy using
   s3cmd dellifecycle --config CONFIG s3://BUCKET
 PROFILE-NAME is selected from `s3-publish-profiles' and used to retrieve
-the bucket name and credentials. An error is signaled if no bucket is defined."
+the bucket name and credentials. An error is signaled if no bucket is defined.
+Prompts to use alternative credentials since this operation requires elevated privileges."
   (interactive (list (completing-read "Select S3 profile: "
                                       (mapcar (lambda (p) (plist-get p :name))
                                               s3-publish-profiles)
                                       nil t)
-               (read-string
-               "Enter number of expiry days (leave blank to delete policy): ")))
-  (let* ((profile
-          (s3-publish-get-credentials (s3-publish-get-profile profile-name)))
+                     (read-string
+                      "Enter number of expiry days (leave blank to delete policy): ")))
+  (let* ((base-profile (s3-publish-get-profile profile-name))
+         (profile 
+          (if (y-or-n-p "Lifecycle operations require admin privileges. Use alternative credentials? ")
+              (s3-publish-select-credentials base-profile)
+            (s3-publish-get-credentials base-profile)))
          (bucket (plist-get profile :bucket)))
     (unless bucket
       (error "No bucket defined for profile %s" profile-name))
@@ -923,9 +927,9 @@ the bucket name and credentials. An error is signaled if no bucket is defined."
           (if (zerop exit-code)
               (if (string= days-input "")
                   (message "Lifecycle policy deleted for bucket %s." bucket)
-            (message
-             "Lifecycle policy set for bucket %s: objects expire after %s days"
-                         bucket days-input))
+                (message
+                 "Lifecycle policy set for bucket %s: objects expire after %s days"
+                 bucket days-input))
             (with-current-buffer output-buffer
               (error "Error updating lifecycle policy: %s" (buffer-string))))
         (kill-buffer output-buffer)))))
