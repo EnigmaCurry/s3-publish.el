@@ -213,25 +213,25 @@ The =s3-publish= command automatically detects your current editing
 context and dispatches the appropriate S3 publishing action (Do What I
 Mean). Its behavior is determined by the following priorities:
 
-- **Region selected:**
+- *Region selected:*
 
   If you have an active region, the command calls =s3-publish-region=
   to upload the selected text to S3.
 
-- **In org-mode buffer:**
+- *In org-mode buffer:*
   - Without a prefix argument, it exports your Org buffer to HTML and
     uploads it using =s3-publish-org-buffer=.
   - With a universal (prefix) argument (e.g., =C-u M-x s3-publish=),
     it removes the file associated with the Org buffer from S3 by
     calling =s3-publish-remove-file=.
 
-- **In dired buffer:**
+- *In dired buffer:*
   - Without a prefix argument, it uploads the marked files using
     =s3-publish-dired-upload-files=.
   - With a prefix argument, it removes the marked files from S3 using
     =s3-publish-dired-remove-files=.
 
-- **Other buffers:**
+- *Other buffers:*
   - Without a prefix argument, the entire buffer is published using
     =s3-publish-buffer=.
   - With a prefix argument, it removes the file backing the current
