@@ -1797,4 +1797,54 @@ Closes any dired buffers visiting the mountpoint."
     (display-buffer output-buffer)
     (message "Unmounting %s..." mountpoint)))
 
-(Provide 's3-publish)
+(defun s3-publish-select-credentials (profile)
+  "Interactively select credentials for operations on PROFILE.
+Presents a list of available auth-source entries that might be suitable
+for S3 operations and allows the user to select one.
+Returns a new plist combining the original PROFILE with the selected credentials.
+If user cancels, returns the original profile with regular credentials."
+  (let* ((profile-name (plist-get profile :name))
+         ;; Get all auth-source entries that might be S3 credentials
+         (auth-entries (auth-source-search :require '(:user :secret) :max 100)))
+
+    ;; Filter to likely S3-related entries and create selection list
+    (let* ((s3-entries (cl-remove-if-not
+                       (lambda (entry)
+                         (let ((host (plist-get entry :host)))
+                           (and host
+                                (or (string-match-p "s3" host)
+                                    (string-match-p "space" host)
+                                    (string-match-p "aws" host)
+                                    (string-match-p "amazon" host)
+                                    (string-match-p "minio" host)
+                                    (string-match-p "storage" host)))))
+                       auth-entries))
+           (options (mapcar (lambda (entry)
+                              (cons (format "%s (user: %s)"
+                                          (plist-get entry :host)
+                                          (plist-get entry :user))
+                                  entry))
+                           s3-entries))
+           ;; Add option for regular credentials
+           (options (append options
+                           (list (cons (format "Default credentials for profile '%s'" profile-name) nil))))
+           ;; Let user select
+           (selection (completing-read
+                      "Select credentials for S3 operation: "
+                      options nil t))
+           (selected-entry (cdr (assoc selection options))))
+
+      (if selected-entry
+          ;; Return profile with selected credentials
+          (let* ((access-key (plist-get selected-entry :user))
+                 (secret (let ((sec (plist-get selected-entry :secret)))
+                           (if (functionp sec)
+                               (funcall sec)
+                             sec))))
+            (append profile (list :access-key access-key :secret-key secret)))
+
+        ;; User selected default credentials
+        (s3-publish-get-credentials profile)))))
+
+
+(provide 's3-publish)
