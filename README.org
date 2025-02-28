@@ -1,36 +1,36 @@
 #+title: Publish to S3 from Emacs
 
 This is an Emacs package that quickly publishes any buffer, region, or
-file to S3 (AWS S3, DigitalOcean spaces, etc.).
+file to S3 and the web (AWS S3, DigitalOcean spaces, etc.).
 
 #+begin_html
 <img alt="s3-publish.el screenshot" src="screenshot.webp"/>
 #+end_html
 
-The intended purpose is for easily sharing temporary files on the web,
-using S3 as a paste-bin service. The object keys of the uploaded files
-will be renamed with a salted hash of the path + file extension, so
-the URLs are serviceable, but not really that pretty:
+The intended purpose is for easily sharing files on the web, using S3
+as a paste-bin service. The object keys of the uploaded files will be
+renamed with a salted hash of the path + file extension, so the URLs
+are serviceable, but not really that pretty:
 
 : https://my-bucket.region.provider/c6ej4-zk2ah-vvjq8-7w244-9bjxp.txt
 
-This long URL is fine if you're just copy and pasting the link into
-a chat message. Since the hash is salted, it is not practical to guess
-what it is, therefore the contents are only accessible to those you
-share the unique URL with.
+This long URL is fine if you're just copy and pasting the link into a
+chat message. Since the hash is salted, it is not practical to guess
+the URL, therefore the contents are only accessible to those whom you
+share it with.
 
-There is also an option to create an index and RSS feed if you wish to
-make these URLs discoverable.
+There is also an option to create an HTML index and RSS feed if you
+wish to make these URLs discoverable.
 
 ** Dependencies
 
 This package requires the following external tools:
 
- * =s3cmd= - Required for all S3 operations
- * =s3fs= - Optional, required only for mounting S3 buckets as local filesystems
- * =fusermount= - Optional, required for unmounting s3fs mounts
+ * =s3cmd= - Required for all S3 operations.
+ * =s3fs= - Optional, required only for mounting S3 buckets as local filesystems.
+ * =fusermount= - Optional, required for unmounting s3fs mounts.
 
-These can be installed via your OS package manager.
+These dependencies can be installed via your OS package manager.
 
 ** Installation
 
@@ -173,7 +173,7 @@ name.
 The buffer can even contain non-text data, e.g. images. In this case,
 choose the encoding type =raw=.
 
-*** Publish Region
+g*** Publish Region
 
 Like publishing buffers, you can publish a select region of text.
 
