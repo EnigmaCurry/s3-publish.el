@@ -1319,7 +1319,7 @@ item is updated with the new title, description, and date."
   (with-temp-buffer
     (insert feed)
     (goto-char (point-min))
-    
+
     ;; Check if an item with this URL already exists
     (let ((match-data (s3-publish-feed-contains-url-p feed file-url)))
       (if match-data
@@ -1358,7 +1358,7 @@ item is updated with the new title, description, and date."
                           file-url
                           description
                           (s3-publish-format-rfc822-date pubdate)))))))
-    
+
     ;; Update the lastBuildDate regardless of whether we added or updated
     (goto-char (point-min))
     (when (re-search-forward "<lastBuildDate>[^<]*</lastBuildDate>" nil t)
@@ -1377,18 +1377,18 @@ PUBDATE is the publication date as a time value.
 If the index already contains an entry with the same URL, updates it instead."
   (with-temp-buffer
     (insert html)
-    
+
     ;; Find the entries div and make sure it exists
     (goto-char (point-min))
     (unless (re-search-forward "<div class=\"entries\">" nil t)
       (error "Invalid HTML index format - no entries div found"))
-    
+
     ;; Check if an entry with this URL already exists
     (let ((match-data (s3-publish-html-index-contains-url-p html file-url)))
       (if match-data
           ;; If found, update the existing entry
           (save-match-data
-            (set-match-data match-data) 
+            (set-match-data match-data)
             (let ((entry-start (match-beginning 0))
                   (entry-end (match-end 0)))
               (delete-region entry-start entry-end)
@@ -1433,8 +1433,8 @@ Returns the match data if found, nil otherwise."
     (let ((case-fold-search t)
           (url-pattern (regexp-quote url)))
       ;; We need a more precise regex that accounts for variations in XML
-      (when (re-search-forward 
-             (format 
+      (when (re-search-forward
+             (format
               "<item>\\(\\(.\\|\n\\)*?\\)<link>\\(\\(.\\|\n\\)*?\\)%s\\(\\(.\\|\n\\)*?\\)</link>\\(\\(.\\|\n\\)*?\\)</item>" 
               url-pattern)
              nil t)
@@ -1450,8 +1450,8 @@ Returns the match data if found, nil otherwise."
     (let ((case-fold-search t)
           (url-pattern (regexp-quote url)))
       ;; We need a more precise regex that accounts for variations in HTML
-      (when (re-search-forward 
-             (format 
+      (when (re-search-forward
+             (format
               "<div class=\"entry\">\\(\\(.\\|\n\\)*?\\)<a href=\"\\(\\(.\\|\n\\)*?\\)%s\\(\\(.\\|\n\\)*?\\)\"\\(\\(.\\|\n\\)*?\\)</div>\\s-*</div>"
               url-pattern)
              nil t)
@@ -1515,8 +1515,8 @@ they will be updated rather than duplicated."
                        (found nil))
                    ;; Look for any item with this URL
                    (goto-char (point-min))
-                   (if (re-search-forward 
-                        (format "<item>\\(\\(.\\|\n\\)*?\\)<link>\\(\\(.\\|\n\\)*?\\)%s\\(\\(.\\|\n\\)*?\\)</link>\\(\\(.\\|\n\\)*?\\)</item>" 
+                   (if (re-search-forward
+                        (format "<item>\\(\\(.\\|\n\\)*?\\)<link>\\(\\(.\\|\n\\)*?\\)%s\\(\\(.\\|\n\\)*?\\)</link>\\(\\(.\\|\n\\)*?\\)</item>"
                                 url-pattern)
                         nil t)
                        ;; If found, replace the item
@@ -1556,7 +1556,7 @@ they will be updated rather than duplicated."
                        (found nil))
                    ;; Look for any entry with this URL
                    (goto-char (point-min))
-                   (if (re-search-forward 
+                   (if (re-search-forward
                         (format "<div class=\"entry\">\\(\\(.\\|\n\\)*?\\)<a href=\"\\(\\(.\\|\n\\)*?\\)%s\\(\\(.\\|\n\\)*?\\)\"\\(\\(.\\|\n\\)*?\\)</div>\\s-*</div>"
                                 url-pattern)
                         nil t)
@@ -1624,5 +1624,177 @@ they will be updated rather than duplicated."
               (delete-file feed-temp-file))
             (when (file-exists-p index-temp-file)
               (delete-file index-temp-file))))))))
+(defun s3-publish-s3fs-mount (profile-name mountpoint)
+  "Mount the S3 bucket from PROFILE-NAME at MOUNTPOINT using s3fs.
+Checks if s3fs is installed, then mounts the bucket. The bucket
+will be mounted with the appropriate credentials from the profile.
+This allows direct file system access to the bucket contents.
+When the mount is successful, opens the mountpoint in a dired buffer."
+  (interactive
+   (list
+    ;; Prompt for profile name
+    (completing-read "Select S3 profile: "
+                     (mapcar (lambda (p) (plist-get p :name))
+                             s3-publish-profiles)
+                     nil t)
+    ;; Prompt for mountpoint
+    (read-directory-name "Mount at directory: ")))
 
-(provide 's3-publish)
+  ;; Check if s3fs is installed
+  (unless (executable-find "s3fs")
+    (error "s3fs is not installed or not in PATH. Please install s3fs first"))
+
+  ;; Ensure mountpoint exists
+  (unless (file-directory-p mountpoint)
+    (if (y-or-n-p (format "Directory %s does not exist. Create it? " mountpoint))
+        (make-directory mountpoint t)
+      (error "Mount aborted - mountpoint does not exist")))
+
+  ;; Get profile with credentials
+  (let* ((profile (s3-publish-get-credentials (s3-publish-get-profile profile-name)))
+         (bucket (plist-get profile :bucket))
+         (access-key (plist-get profile :access-key))
+         (secret-key (plist-get profile :secret-key))
+         (endpoint (plist-get profile :endpoint))
+         (url-host-base (replace-regexp-in-string "^https?://" "" endpoint))
+         (url-host-base (replace-regexp-in-string "/$" "" url-host-base))
+         (host-base (if (string-prefix-p (concat bucket ".") url-host-base)
+                        (replace-regexp-in-string
+                         (concat "^" (regexp-quote (concat bucket "."))) "" url-host-base)
+                      url-host-base))
+         ;; Create a temporary credentials file for s3fs
+         (passwd-file (make-temp-file "s3fs-credentials-"))
+         (passwd-content (format "%s:%s:%s" bucket access-key secret-key))
+         (process-buffer (get-buffer-create "*s3fs-process*")))
+
+    ;; Write credentials to temporary file with secure permissions
+    (with-temp-file passwd-file
+      (insert passwd-content))
+    (set-file-modes passwd-file #o600) ;; secure the credentials file
+
+    ;; Build s3fs command with correct arguments
+    (let* ((mount-process-name "s3fs-mount-process")
+           (region (car (split-string host-base "\\.")))
+           (s3fs-args (list
+                       bucket  ;; bucket name
+                       (expand-file-name mountpoint)  ;; mountpoint
+                       "-o" (format "passwd_file=%s" passwd-file)
+                       "-o" (format "url=https://%s" host-base)
+                       "-o" "use_path_request_style"
+                       "-o" (format "endpoint=%s" region)
+                       "-o" "dbglevel=info")))
+
+      ;; Clear the process buffer
+      (with-current-buffer process-buffer
+        (erase-buffer))
+
+      ;; Define a function to check if the mount is successful
+      (defun s3-publish--check-mount (mountpoint passwd-file bucket process-buffer)
+        "Check if the mountpoint is successfully mounted with s3fs.
+If the mount is successful, opens the mountpoint in a dired buffer."
+        (let ((mounted nil))
+          ;; Wait a bit for the mount to complete
+          (sleep-for 1)
+
+          ;; Check if mountpoint is now an s3fs mount
+          ;; Try multiple verification methods
+          (with-temp-buffer
+            ;; Method 1: Check mount command output
+            (call-process "mount" nil t nil)
+            (goto-char (point-min))
+            (when (re-search-forward (format "s3fs.*%s" (regexp-quote mountpoint)) nil t)
+              (setq mounted t))
+
+            ;; Method 2: Check if the mountpoint has s3fs filesystem type
+            (unless mounted
+              (erase-buffer)
+              (call-process "stat" nil t nil "-f" "-c" "%T" mountpoint)
+              (goto-char (point-min))
+              (when (or (looking-at "fuse\\.s3fs") 
+                        (looking-at "fuse"))
+                (setq mounted t)))
+
+            ;; Method 3: Check if we can list the directory (this might be slow)
+            (unless mounted
+              (condition-case nil
+                  (let ((files (directory-files mountpoint)))
+                    (when files
+                      (setq mounted t)))
+                (error nil))))
+
+          ;; Handle the verification result
+          (if mounted
+              (progn
+                (message "S3 bucket %s successfully mounted at %s" bucket mountpoint)
+                ;; Clean up the credentials file
+                (when (file-exists-p passwd-file)
+                  (delete-file passwd-file))
+                ;; Open the mountpoint in dired
+                (dired mountpoint))
+            (message "Warning: Cannot verify if s3fs mount succeeded. The mount may still be working. Check %s for details."
+                     (buffer-name process-buffer)))))
+
+      ;; Start s3fs as an asynchronous process
+      (make-process
+       :name mount-process-name
+       :buffer process-buffer
+       :command (cons "s3fs" s3fs-args)
+       :sentinel
+       (lambda (proc event)
+         (when (string-match-p "finished" event)
+           ;; Run our verification function
+           (s3-publish--check-mount mountpoint passwd-file bucket process-buffer))))
+
+      ;; Show the process buffer
+      (display-buffer process-buffer)
+
+      ;; Return a message immediately
+      (message "Starting s3fs mount process... Check %s for progress" 
+               (buffer-name process-buffer)))))
+
+;; Update the unmount function to close any dired buffers for the unmounted directory
+(defun s3-publish-s3fs-unmount (mountpoint)
+  "Unmount the S3 bucket mounted at MOUNTPOINT.
+Uses the fusermount command to unmount an s3fs filesystem.
+Closes any dired buffers visiting the mountpoint."
+  (interactive
+   (list (read-directory-name "Unmount directory: ")))
+
+  ;; Check if fusermount is installed
+  (unless (executable-find "fusermount")
+    (error "fusermount is not installed or not in PATH"))
+
+  ;; Ensure mountpoint exists
+  (unless (file-directory-p mountpoint)
+    (error "Directory %s does not exist" mountpoint))
+
+  ;; Find and kill any dired buffers viewing this directory or subdirectories
+  (let ((expanded-mountpoint (expand-file-name mountpoint)))
+    (dolist (buffer (buffer-list))
+      (with-current-buffer buffer
+        (when (and (eq major-mode 'dired-mode)
+                   (string-prefix-p expanded-mountpoint
+                                    (expand-file-name default-directory)))
+          (kill-buffer buffer)))))
+
+  (let ((output-buffer (get-buffer-create "*s3fs-unmount-output*")))
+    (with-current-buffer output-buffer
+      (erase-buffer))
+
+    ;; Run fusermount to unmount asynchronously
+    (make-process
+     :name "s3fs-unmount-process"
+     :buffer output-buffer
+     :command (list "fusermount" "-u" (expand-file-name mountpoint))
+     :sentinel
+     (lambda (proc event)
+       (when (string-match-p "finished" event)
+         (if (= 0 (process-exit-status proc))
+             (message "Successfully unmounted %s" mountpoint)
+           (with-current-buffer output-buffer
+             (message "Failed to unmount: %s" (buffer-string)))))))
+
+    (display-buffer output-buffer)
+    (message "Unmounting %s..." mountpoint)))
+
+(Provide 's3-publish)
