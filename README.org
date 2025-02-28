@@ -3,6 +3,10 @@
 This is an Emacs package that quickly publishes any buffer, region, or
 file to S3 and the web (AWS S3, DigitalOcean spaces, etc.).
 
+Example: https://org.nyc3.digitaloceanspaces.com/index.html
+
+------------------------------------------------------------
+
 #+begin_html
 <img alt="s3-publish.el screenshot" src="screenshot.webp"/>
 #+end_html
