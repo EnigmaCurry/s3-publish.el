@@ -173,7 +173,7 @@ name.
 The buffer can even contain non-text data, e.g. images. In this case,
 choose the encoding type =raw=.
 
-g*** Publish Region
+*** Publish Region
 
 Like publishing buffers, you can publish a select region of text.
 
