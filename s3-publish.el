@@ -26,34 +26,6 @@
   :prefix "s3-publish-"
   :group 'external)
 
-(defcustom s3-publish-profiles nil
-  "List of S3 publishing profiles.
-Each profile is an alist containing the following keys:
-  - :name       A unique identifier for the profile.
-  - :endpoint   The domain of the S3-compatible endpoint (minus bucket name).
-  - :bucket     The bucket name to which files will be published.
-  - :public-acl A boolean indicating if the file is public.
-  - :salt       A random string used to salt file keys (generated when added).
-The auth-source machine name will be derived by prepending \"s3-publish-\" to
-the profile name.
-Example:
-  ((:name \"default\"
-     :endpoint \"s3.amazonaws.com\"
-     :bucket \"my-bucket\"
-     :public-acl t
-     :salt \"1a2b3c4d\")
-    (:name \"do-spaces\"
-     :endpoint \"nyc3.digitaloceanspaces.com\"
-     :bucket \"do-bucket\"
-     :public-acl nil
-     :salt \"9e8f7d6c\"))
-"
-  :group 's3-publish
-  :type '(repeat
-          (alist :key-type symbol
-                 :value-type (choice
-                              (string :tag "String")
-                              (boolean :tag "Boolean")))))
 
 (defun s3-publish-get-credentials (profile)
   "Retrieve S3 credentials for the given PROFILE.
@@ -91,25 +63,6 @@ an error is signaled."
 (defvar s3-publish-profiles-buffer "*s3-publish-profiles*"
   "Buffer name for displaying s3-publish profiles.")
 
-(defun s3-publish-refresh-profiles-buffer ()
-  "Refresh the s3-publish profiles list in the dedicated buffer.
-If the buffer does not exist, it is created."
-  (with-current-buffer (get-buffer-create s3-publish-profiles-buffer)
-    (let ((inhibit-read-only t))
-      (erase-buffer)
-      (if s3-publish-profiles
-          (dolist (p s3-publish-profiles)
-            (insert (format
-              "Name: %s\nEndpoint: %s\nBucket: %s\nPublic ACL: %s\nSalt: %s\n\n"
-                     (plist-get p :name)
-                     (plist-get p :endpoint)
-                     (plist-get p :bucket)
-                     (if (plist-get p :public-acl) "Yes" "No")
-                     (or (plist-get p :salt) "Not set")))
-          (insert "No s3-publish profiles defined."))
-      (goto-char (point-min))
-      (read-only-mode 1)))
-  (display-buffer s3-publish-profiles-buffer)))
 
 (defun s3-publish-manage-profiles ()
   "Manage s3-publish profiles interactively.
@@ -154,24 +107,6 @@ killing the buffer."
                   (or (plist-get p :salt) "Not set")))))
     (message "No s3-publish profiles defined.")))
 
-(defun s3-publish-add-profile ()
-  "Add a new s3-publish profile interactively.
-Generates a random salt (an 8-character string) and stores it with the profile."
-  (let* ((name (read-string "Profile name: "))
-         (endpoint (read-string "Endpoint URL: "))
-         (bucket (read-string "Bucket name: "))
-         (public-acl (y-or-n-p "Make files public? "))
-         (salt (substring (md5 (format "%s-%d" (current-time-string) (random)))
-                          0 32))
-         (new-profile (list :name name
-                            :endpoint endpoint
-                            :bucket bucket
-                            :public-acl public-acl
-                            :salt salt)))
-    (setq s3-publish-profiles (append s3-publish-profiles (list new-profile)))
-    (s3-publish-save-profiles)
-    (message "Profile '%s' added." name)
-    (s3-publish-refresh-profiles-buffer)))
 
 (defun s3-publish-remove-profile ()
   "Remove an existing s3-publish profile interactively."
@@ -185,41 +120,6 @@ Generates a random salt (an 8-character string) and stores it with the profile."
     (message "Profile '%s' removed." name)
     (s3-publish-refresh-profiles-buffer)))
 
-(defun s3-publish-edit-profile ()
-  "Edit an existing s3-publish profile interactively."
-  (let* ((names (mapcar (lambda (p) (plist-get p :name)) s3-publish-profiles))
-         (name (completing-read "Edit profile: " names nil t))
-         (profile (seq-find (lambda (p)
-                              (string= (plist-get p :name) name))
-                            s3-publish-profiles)))
-    (if profile
-        (let* ((new-endpoint
-                (read-string (format "Endpoint URL (current: %s): "
-                                     (plist-get profile :endpoint))
-                             nil nil (plist-get profile :endpoint)))
-               (new-bucket
-                (read-string (format "Bucket name (current: %s): "
-                                     (plist-get profile :bucket))
-                             nil nil (plist-get profile :bucket)))
-               (new-public-acl
-                (y-or-n-p (format "Make files public? (current: %s): "
-                             (if (plist-get profile :public-acl) "Yes" "No"))))
-               ;; Retain the existing salt.
-               (edited-profile (list :name name
-                                     :endpoint new-endpoint
-                                     :bucket new-bucket
-                                     :public-acl new-public-acl
-                                     :salt (plist-get profile :salt))))
-          (setq s3-publish-profiles
-                (mapcar (lambda (p)
-                          (if (string= (plist-get p :name) name)
-                              edited-profile
-                            p))
-                        s3-publish-profiles))
-          (s3-publish-save-profiles)
-          (message "Profile '%s' updated." name))
-      (message "Profile '%s' not found." name))
-    (s3-publish-refresh-profiles-buffer)))
 
 (defun s3-publish-save-profiles ()
   "Persist the current value of `s3-publish-profiles` to the custom file."
@@ -299,17 +199,367 @@ website_endpoint = http://%%(bucket)s.%s/
         (insert config-content))
       tmp-file)))
 
-(defun s3-publish-upload-file (file profile)
+
+;; Add RSS feed support to profile settings
+(defcustom s3-publish-profiles nil
+  "List of S3 publishing profiles.
+Each profile is an alist containing the following keys:
+  - :name       A unique identifier for the profile.
+  - :endpoint   The domain of the S3-compatible endpoint (minus bucket name).
+  - :bucket     The bucket name to which files will be published.
+  - :public-acl A boolean indicating if the file is public.
+  - :salt       A random string used to salt file keys (generated when added).
+  - :rss-feed   A boolean indicating if an RSS feed should be maintained.
+  - :rss-title  The title of the RSS feed.
+  - :rss-desc   The description of the RSS feed.
+  - :rss-link   The base URL for the RSS feed (usually the bucket URL).
+The auth-source machine name will be derived by prepending \"s3-publish-\" to
+the profile name.
+Example:
+  ((:name \"default\"
+     :endpoint \"s3.amazonaws.com\"
+     :bucket \"my-bucket\"
+     :public-acl t
+     :salt \"1a2b3c4d\"
+     :rss-feed t
+     :rss-title \"My Public Files\"
+     :rss-desc \"Files published from Emacs\"
+     :rss-link \"https://my-bucket.s3.amazonaws.com\")
+    (:name \"do-spaces\"
+     :endpoint \"nyc3.digitaloceanspaces.com\"
+     :bucket \"do-bucket\"
+     :public-acl nil
+     :salt \"9e8f7d6c\"
+     :rss-feed nil))
+"
+  :group 's3-publish
+  :type '(repeat
+          (alist :key-type symbol
+                 :value-type (choice
+                              (string :tag "String")
+                              (boolean :tag "Boolean")))))
+
+;; Extend profile display function to show RSS settings
+(defun s3-publish-refresh-profiles-buffer ()
+  "Refresh the s3-publish profiles list in the dedicated buffer.
+If the buffer does not exist, it is created."
+  (with-current-buffer (get-buffer-create s3-publish-profiles-buffer)
+    (let ((inhibit-read-only t))
+      (erase-buffer)
+      (if s3-publish-profiles
+          (dolist (p s3-publish-profiles)
+            (insert (format
+                     "Name: %s\nEndpoint: %s\nBucket: %s\nPublic ACL: %s\nSalt: %s\n"
+                     (plist-get p :name)
+                     (plist-get p :endpoint)
+                     (plist-get p :bucket)
+                     (if (plist-get p :public-acl) "Yes" "No")
+                     (or (plist-get p :salt) "Not set")))
+            (let ((rss-feed (plist-get p :rss-feed)))
+              (insert (format "RSS Feed: %s\n" (if rss-feed "Yes" "No")))
+              (when rss-feed
+                (insert (format "  - Title: %s\n  - Description: %s\n  - Link: %s\n"
+                                (or (plist-get p :rss-title) "Not set")
+                                (or (plist-get p :rss-desc) "Not set")
+                                (or (plist-get p :rss-link) "Not set")))))
+            (insert "\n"))
+        (insert "No s3-publish profiles defined."))
+      (goto-char (point-min))
+      (read-only-mode 1)))
+  (display-buffer s3-publish-profiles-buffer))
+
+;; Extend profile add function to include RSS settings
+(defun s3-publish-add-profile ()
+  "Add a new s3-publish profile interactively.
+Generates a random salt (an 8-character string) and stores it with the profile."
+  (let* ((name (read-string "Profile name: "))
+         (endpoint (read-string "Endpoint URL: "))
+         (bucket (read-string "Bucket name: "))
+         (public-acl (y-or-n-p "Make files public? "))
+         (salt (substring (md5 (format "%s-%d" (current-time-string) (random)))
+                          0 32))
+         (rss-feed (y-or-n-p "Maintain an RSS feed for published files? "))
+         (new-profile (list :name name
+                            :endpoint endpoint
+                            :bucket bucket
+                            :public-acl public-acl
+                            :salt salt
+                            :rss-feed rss-feed)))
+
+    ;; If RSS feed is enabled, prompt for additional settings
+    (when rss-feed
+      (let* ((rss-title (read-string "RSS feed title: " (format "%s Files" name)))
+            (rss-desc (read-string "RSS feed description: " "Files published from Emacs"))
+            (host-base (replace-regexp-in-string "^https?://" "" endpoint))
+            (host-base (replace-regexp-in-string "/$" "" host-base))
+            (host-base (if (string-prefix-p (concat bucket ".") host-base)
+                           (replace-regexp-in-string
+                            (concat "^" (regexp-quote (concat bucket "."))) "" host-base)
+                         host-base)))
+        (let ((default-link (format "https://%s.%s" bucket host-base)))
+          (setq new-profile
+                (append new-profile
+                        (list :rss-title rss-title
+                              :rss-desc rss-desc
+                              :rss-link (read-string "RSS feed base URL: " default-link)))))))
+
+    (setq s3-publish-profiles (append s3-publish-profiles (list new-profile)))
+    (s3-publish-save-profiles)
+    (message "Profile '%s' added." name)
+    (s3-publish-refresh-profiles-buffer)))
+
+;; Extend profile edit function to include RSS settings
+(defun s3-publish-edit-profile ()
+  "Edit an existing s3-publish profile interactively."
+  (let* ((names (mapcar (lambda (p) (plist-get p :name)) s3-publish-profiles))
+         (name (completing-read "Edit profile: " names nil t))
+         (profile (seq-find (lambda (p)
+                              (string= (plist-get p :name) name))
+                            s3-publish-profiles)))
+    (if profile
+        (let* ((new-endpoint
+                (read-string (format "Endpoint URL (current: %s): "
+                                     (plist-get profile :endpoint))
+                             nil nil (plist-get profile :endpoint)))
+               (new-bucket
+                (read-string (format "Bucket name (current: %s): "
+                                     (plist-get profile :bucket))
+                             nil nil (plist-get profile :bucket)))
+               (new-public-acl
+                (y-or-n-p (format "Make files public? (current: %s): "
+                                  (if (plist-get profile :public-acl) "Yes" "No"))))
+               (rss-enabled (plist-get profile :rss-feed))
+               (new-rss-feed
+                (y-or-n-p (format "Maintain RSS feed? (current: %s): "
+                                  (if rss-enabled "Yes" "No"))))
+               ;; Retain the existing salt
+               (edited-profile (list :name name
+                                     :endpoint new-endpoint
+                                     :bucket new-bucket
+                                     :public-acl new-public-acl
+                                     :salt (plist-get profile :salt)
+                                     :rss-feed new-rss-feed)))
+
+          ;; If RSS feed is newly enabled or was already enabled
+          (when new-rss-feed
+            (let* ((current-title (or (plist-get profile :rss-title) ""))
+                   (current-desc (or (plist-get profile :rss-desc) ""))
+                   (current-link (or (plist-get profile :rss-link) ""))
+                   (new-title
+                    (read-string (format "RSS feed title (current: %s): "
+                                         (if (string= current-title "") "Not set" current-title))
+                                 nil nil (if (string= current-title "")
+                                             (format "%s Files" name)
+                                           current-title)))
+                   (new-desc
+                    (read-string (format "RSS feed description (current: %s): "
+                                         (if (string= current-desc "") "Not set" current-desc))
+                                 nil nil (if (string= current-desc "")
+                                             "Files published from Emacs"
+                                           current-desc)))
+                   (host-base (replace-regexp-in-string "^https?://" "" new-endpoint))
+                   (host-base (replace-regexp-in-string "/$" "" host-base))
+                   (host-base (if (string-prefix-p (concat new-bucket ".") host-base)
+                                  (replace-regexp-in-string
+                                   (concat "^" (regexp-quote (concat new-bucket "."))) "" host-base)
+                                host-base))
+                   (default-link (if (string= current-link "")
+                                     (format "https://%s.%s" new-bucket host-base)
+                                   current-link))
+                   (new-link
+                    (read-string (format "RSS feed base URL (current: %s): "
+                                         (if (string= current-link "") "Not set" current-link))
+                                 nil nil default-link)))
+              (setq edited-profile
+                    (append edited-profile
+                            (list :rss-title new-title
+                                  :rss-desc new-desc
+                                  :rss-link new-link)))))
+
+          (setq s3-publish-profiles
+                (mapcar (lambda (p)
+                          (if (string= (plist-get p :name) name)
+                              edited-profile
+                            p))
+                        s3-publish-profiles))
+          (s3-publish-save-profiles)
+          (message "Profile '%s' updated." name))
+      (message "Profile '%s' not found." name))
+    (s3-publish-refresh-profiles-buffer)))
+
+;; RSS feed management functions
+(defconst s3-publish-rss-filename "index.xml"
+  "Filename for the RSS feed XML file.")
+
+(defconst s3-publish-html-index-filename "index.html"
+  "Filename for the HTML index file.")
+
+(defun s3-publish-format-rfc822-date (time)
+  "Format TIME as an RFC822 date string for RSS."
+  (format-time-string "%a, %d %b %Y %T %z" time))
+
+
+(defun s3-publish-download-feed (profile)
+  "Download the current RSS feed for PROFILE from S3.
+Returns the feed content as a string if successful,
+or nil if the feed doesn't exist yet."
+  (let* ((s3cmd-config (s3-publish-generate-s3cmd-config profile))
+         (bucket (plist-get profile :bucket))
+         (s3-uri (format "s3://%s/%s" bucket s3-publish-rss-filename))
+         (temp-file (make-temp-file "s3-publish-feed-" nil ".xml"))
+         (args (list "--config" s3cmd-config "get" s3-uri temp-file "--force"))
+         (output-buffer (generate-new-buffer "*s3-publish-download-feed*"))
+         (exit-code (apply 'call-process "s3cmd" nil output-buffer nil args))
+         content)
+
+    (unwind-protect
+        (progn
+          ;; Check both the exit code and if the file contains content
+          (if (and (zerop exit-code)
+                   (file-exists-p temp-file)
+                   (> (file-attribute-size (file-attributes temp-file)) 0)
+                   (not (with-current-buffer output-buffer
+                          (goto-char (point-min))
+                          (search-forward "WARNING: Not Found" nil t))))
+              (progn
+                (setq content (with-temp-buffer
+                                (insert-file-contents temp-file)
+                                (buffer-string)))
+                (message "Downloaded existing RSS feed from %s" s3-uri)
+                content)
+            (message "No existing RSS feed found at %s, will create new one" s3-uri)
+            nil))
+      (kill-buffer output-buffer)
+      (when (file-exists-p temp-file)
+        (delete-file temp-file)))))
+
+;; Similarly fix the HTML index download function
+(defun s3-publish-download-html-index (profile)
+  "Download the current HTML index for PROFILE from S3.
+Returns the index content as a string if successful,
+or nil if the index doesn't exist yet."
+  (let* ((s3cmd-config (s3-publish-generate-s3cmd-config profile))
+         (bucket (plist-get profile :bucket))
+         (s3-uri (format "s3://%s/%s" bucket s3-publish-html-index-filename))
+         (temp-file (make-temp-file "s3-publish-index-" nil ".html"))
+         (args (list "--config" s3cmd-config "get" s3-uri temp-file "--force"))
+         (output-buffer (generate-new-buffer "*s3-publish-download-index*"))
+         (exit-code (apply 'call-process "s3cmd" nil output-buffer nil args))
+         content)
+
+    (unwind-protect
+        (progn
+          ;; Check both the exit code and if the file contains content
+          (if (and (zerop exit-code)
+                   (file-exists-p temp-file)
+                   (> (file-attribute-size (file-attributes temp-file)) 0)
+                   (not (with-current-buffer output-buffer
+                          (goto-char (point-min))
+                          (search-forward "WARNING: Not Found" nil t))))
+              (progn
+                (setq content (with-temp-buffer
+                                (insert-file-contents temp-file)
+                                (buffer-string)))
+                (message "Downloaded existing HTML index from %s" s3-uri)
+                content)
+            (message "No existing HTML index found at %s, will create new one" s3-uri)
+            nil))
+      (kill-buffer output-buffer)
+      (when (file-exists-p temp-file)
+        (delete-file temp-file)))))
+
+(defun s3-publish-create-new-rss-feed (profile)
+  "Create a new RSS feed XML document for PROFILE."
+  (let ((title (or (plist-get profile :rss-title) 
+                   (format "%s Files" (plist-get profile :name))))
+        (description (or (plist-get profile :rss-desc) 
+                         "Files published from Emacs"))
+        (link (or (plist-get profile :rss-link)
+                  (let* ((bucket (plist-get profile :bucket))
+                         (endpoint (plist-get profile :endpoint))
+                         (host-base (replace-regexp-in-string "^https?://" "" endpoint))
+                         (host-base (replace-regexp-in-string "/$" "" host-base)))
+                    (format "https://%s.%s" bucket host-base)))))
+    (format "<?xml version=\"1.0\" encoding=\"UTF-8\"?>
+<rss version=\"2.0\" xmlns:atom=\"http://www.w3.org/2005/Atom\">
+  <channel>
+    <title>%s</title>
+    <description>%s</description>
+    <link>%s</link>
+    <atom:link href=\"%s/%s\" rel=\"self\" type=\"application/rss+xml\" />
+    <pubDate>%s</pubDate>
+    <lastBuildDate>%s</lastBuildDate>
+    <generator>s3-publish.el</generator>
+  </channel>
+</rss>"
+            title
+            description
+            link
+            link
+            s3-publish-rss-filename
+            (s3-publish-format-rfc822-date (current-time))
+            (s3-publish-format-rfc822-date (current-time)))))
+
+(defun s3-publish-create-new-html-index (profile)
+  "Create a new HTML index page for PROFILE."
+  (let ((title (or (plist-get profile :rss-title)
+                   (format "%s Files" (plist-get profile :name))))
+        (description (or (plist-get profile :rss-desc)
+                         "Files published from Emacs"))
+        (link (or (plist-get profile :rss-link)
+                  (let* ((bucket (plist-get profile :bucket))
+                         (endpoint (plist-get profile :endpoint))
+                         (host-base (replace-regexp-in-string "^https?://" "" endpoint))
+                         (host-base (replace-regexp-in-string "/$" "" host-base)))
+                    (format "https://%s.%s" bucket host-base)))))
+    (format "<!DOCTYPE html>
+<html lang=\"en\">
+<head>
+  <meta charset=\"UTF-8\">
+  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">
+  <title>%s</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif; max-width: 900px; margin: 0 auto; padding: 20px; line-height: 1.5; }
+    h1 { margin-bottom: 10px; }
+    .description { color: #555; margin-bottom: 30px; font-style: italic; }
+    .entry { margin-bottom: 25px; border-bottom: 1px solid #eee; padding-bottom: 20px; }
+    .entry h2 { margin-bottom: 5px; }
+    .entry .date { color: #666; font-size: 0.9em; margin-bottom: 10px; }
+    .entry .link { word-break: break-all; }
+    .footer { margin-top: 30px; font-size: 0.8em; color: #666; }
+    .subscribe { display: inline-block; background: #f5f5f5; padding: 2px 8px; border-radius: 3px; text-decoration: none; color: #444; margin-top: 5px; }
+    .subscribe:hover { background: #e5e5e5; }
+  </style>
+</head>
+<body>
+  <h1>%s</h1>
+  <div class=\"description\">%s</div>
+  <div class=\"entries\">
+    <!-- Entries will be added here -->
+  </div>
+  <div class=\"footer\">
+    <p>Generated by <a href=\"https://github.com/EnigmaCurry/s3-publish.el\">s3-publish.el</a></p>
+    <p><a href=\"%s\" class=\"subscribe\">RSS Feed</a></p>
+  </div>
+</body>
+</html>"
+            title
+            title
+            description
+            (concat link "/" s3-publish-rss-filename))))
+
+(defun s3-publish-upload-file (file profile &optional title description)
   "Upload FILE to S3 using PROFILE.
 PROFILE is a plist that must include :bucket, :endpoint, and credentials
-(:access-key and :secret-key), and now also :salt.
-The file’s key is generated using `s3-publish-get-file-key' with the profile’s
-salt,
+(:access-key and :secret-key), and :salt.
+The file's key is generated using `s3-publish-get-file-key' with the profile's salt,
 and a temporary s3cmd config file is created using
 `s3-publish-generate-s3cmd-config'.
+Optional TITLE and DESCRIPTION are used for RSS feed entries if the profile has
+RSS feed enabled. If not provided, they will be generated from the filename.
 The s3cmd command is run:
   s3cmd --config TMP_CONFIG [--acl-public] put FILE s3://BUCKET/KEY
-If the upload is successful and the profile’s :public-acl is non-nil,
+If the upload is successful and the profile's :public-acl is non-nil,
 this function returns the public URL for the file (constructed as
   https://BUCKET.HOST_BASE/KEY).
 If :public-acl is nil, it returns the S3 URI (e.g., s3://BUCKET/KEY).
@@ -343,20 +593,32 @@ If the upload fails, it signals an error with the error message."
           (setq exit-code
                 (apply 'call-process "s3cmd" nil output-buffer nil args))
           (if (zerop exit-code)
-              (if (plist-get profile :public-acl)
-                  (format "https://%s.%s/%s" bucket host-base key)
-                s3-uri)
+              (let ((url (if (plist-get profile :public-acl)
+                            (format "https://%s.%s/%s" bucket host-base key)
+                          s3-uri)))
+                ;; Update RSS feed if enabled
+                (when (and (plist-get profile :rss-feed)
+                           (plist-get profile :public-acl))
+                  (let ((item-title (or title (file-name-nondirectory file)))
+                        (item-desc (or description
+                                       (format "File published on %s"
+                                              (format-time-string "%Y-%m-%d %H:%M")))))
+                    (s3-publish-update-feed profile url item-title item-desc)))
+                ;; Return the URL
+                url)
             (with-current-buffer output-buffer
               (error "Upload failed: %s" (buffer-string)))))
       (kill-buffer output-buffer))))
 
+;; Update the org buffer publication function to handle feed entries better
 (defun s3-publish-org-buffer ()
   "Export the current Org buffer to HTML and upload it to S3.
 Before exporting, save the buffer and back up the original .org file to S3.
 Both files share the same key (computed from the org file and profile salt)
 with only their extensions differing.
 A link to the .org file is appended to the bottom of the HTML file.
-Only the HTML file URL is displayed and copied to the kill ring."
+Only the HTML file URL is displayed and copied to the kill ring.
+When updating the RSS feed, both files are grouped as a single entry."
   (interactive)
   ;; Save the current buffer if modified.
   (when (and (buffer-file-name) (buffer-modified-p))
@@ -374,8 +636,22 @@ Only the HTML file URL is displayed and copied to the kill ring."
          (full-key (s3-publish-get-file-key org-file salt))
          (base-key (file-name-sans-extension full-key))
          (org-key (concat base-key ".org"))
-         (html-key (concat base-key ".html")))
-    (cl-labels ((upload-with-key (file profile key)
+         (html-key (concat base-key ".html"))
+         ;; Extract title and description from org file for RSS feed
+         (org-title (or (save-excursion
+                          (goto-char (point-min))
+                          (and (re-search-forward "^#\\+TITLE:\\s-*\\(.*\\)$" nil t)
+                               (match-string 1)))
+                        (file-name-nondirectory org-file)))
+         (org-description (or (save-excursion
+                                (goto-char (point-min))
+                                (and (re-search-forward "^#\\+DESCRIPTION:\\s-*\\(.*\\)$" nil t)
+                                     (match-string 1)))
+                              (format "Published on %s" (format-time-string "%Y-%m-%d %H:%M")))))
+    (cl-labels ((get-public-url (bucket key host-base)
+                  (format "https://%s.%s/%s" bucket host-base key))
+                (upload-file-no-feed (file profile key)
+                  "Upload file without updating the RSS feed"
                   (let* ((s3cmd-config (s3-publish-generate-s3cmd-config profile))
                          (bucket (plist-get profile :bucket))
                          (endpoint (plist-get profile :endpoint))
@@ -397,14 +673,16 @@ Only the HTML file URL is displayed and copied to the kill ring."
                         (progn
                           (setq exit-code (apply 'call-process "s3cmd" nil output-buffer nil args))
                           (if (zerop exit-code)
-                              (if (plist-get profile :public-acl)
-                                  (format "https://%s.%s/%s" bucket host-base key)
-                                s3-uri)
+                              (let ((url (if (plist-get profile :public-acl)
+                                             (get-public-url bucket key host-base)
+                                           s3-uri)))
+                                url)
                             (with-current-buffer output-buffer
                               (error "Upload failed: %s" (buffer-string)))))
                       (kill-buffer output-buffer)))))
-      ;; Backup the original .org file and capture its URL.
-      (let ((org-url (upload-with-key org-file profile org-key)))
+
+      ;; Backup the original .org file (without updating the feed yet)
+      (let ((org-url (upload-file-no-feed org-file profile org-key)))
         ;; Export the Org buffer to an HTML file.
         (let* ((html-file (org-html-export-to-html))
                (html-file (if (file-symlink-p html-file)
@@ -422,8 +700,28 @@ Only the HTML file URL is displayed and copied to the kill ring."
                 (goto-char (point-max))
                 (insert (format "\n<div id=\"org-download\"><a href=\"%s\">View Org file source</a></div>\n" org-url))))
             (write-region (point-min) (point-max) html-file nil 'quiet))
-          ;; Upload the modified HTML file using html-key.
-          (let ((html-url (upload-with-key html-file profile html-key)))
+
+          ;; Upload the modified HTML file
+          (let* ((html-url (upload-file-no-feed html-file profile html-key))
+                 (bucket (plist-get profile :bucket))
+                 (endpoint (plist-get profile :endpoint))
+                 (host-base (replace-regexp-in-string "^https?://" "" endpoint))
+                 (host-base (replace-regexp-in-string "/$" "" host-base))
+                 (host-base (if (string-prefix-p (concat bucket ".") host-base)
+                                (replace-regexp-in-string (concat "^" (regexp-quote (concat bucket "."))) "" host-base)
+                              host-base)))
+
+            ;; Now update RSS feed with a single entry containing links to both files
+            (when (and (plist-get profile :rss-feed)
+                       (plist-get profile :public-acl))
+              ;; Create a more comprehensive description that includes both links
+              (let* ((combined-description
+                      (format "%s<p>View: <a href=\"%s\">HTML</a> | <a href=\"%s\">Org source</a></p>"
+                              org-description html-url org-url)))
+                ;; Update feed with the combined description, using HTML URL as the primary URL
+                (s3-publish-update-feed profile html-url org-title combined-description)))
+
+            ;; Return the HTML URL as this is the primary content
             (kill-new html-url)
             (message "%s" html-url)
             html-url))))))
@@ -441,7 +739,12 @@ the kill ring and displayed in the echo area."
                   (concat "." (file-name-extension buffer-filename))
                 ".txt"))
          (temp-file (make-temp-file "s3-publish-buffer-" nil ext))
-         (contents (buffer-substring-no-properties (point-min) (point-max))))
+         (contents (buffer-substring-no-properties (point-min) (point-max)))
+         ;; Prepare title for RSS feed
+         (title (or (and buffer-filename (file-name-nondirectory buffer-filename))
+                    (buffer-name)))
+         (description (format "Buffer content published on %s" 
+                             (format-time-string "%Y-%m-%d %H:%M"))))
     (with-temp-file temp-file
       (insert contents))
     ;; Prompt for a profile.
@@ -451,7 +754,7 @@ the kill ring and displayed in the echo area."
             (completing-read "Select S3 profile: " profile-names nil t))
            (profile
             (s3-publish-get-credentials (s3-publish-get-profile profile-name)))
-           (upload-result (s3-publish-upload-file temp-file profile))
+           (upload-result (s3-publish-upload-file temp-file profile title description))
            (url (if (stringp upload-result) upload-result upload-result)))
       (delete-file temp-file)
       (kill-new url)
@@ -468,7 +771,14 @@ and displayed in the echo area."
   (unless (use-region-p)
     (error "No region selected"))
   (let* ((temp-file (make-temp-file "s3-publish-region-" nil ".txt"))
-         (region-text (buffer-substring-no-properties start end)))
+         (region-text (buffer-substring-no-properties start end))
+         (buffer-filename (buffer-file-name))
+         (title (format "Text from %s"
+                       (or (and buffer-filename
+                                (file-name-nondirectory buffer-filename))
+                           (buffer-name))))
+         (description (format "Text selection published on %s"
+                            (format-time-string "%Y-%m-%d %H:%M"))))
     (with-temp-file temp-file
       (insert region-text))
     ;; Prompt for a profile.
@@ -481,12 +791,102 @@ and displayed in the echo area."
                              profile-names nil t nil nil default))
            (profile (s3-publish-get-credentials
                      (s3-publish-get-profile profile-name)))
-           (upload-result (s3-publish-upload-file temp-file profile))
+           (upload-result (s3-publish-upload-file temp-file profile title description))
            (url (if (stringp upload-result) upload-result upload-result)))
       (delete-file temp-file)
       (kill-new url)
       (message "%s" url)
       url)))
+
+;; Add command to view RSS feed or HTML index
+(defun s3-publish-view-index (profile-name)
+  "View the HTML index for the specified PROFILE-NAME.
+If the index doesn't exist yet, offer to create it."
+  (interactive
+   (list (completing-read "Select S3 profile: "
+                          (mapcar (lambda (p) (plist-get p :name))
+                                  s3-publish-profiles)
+                          nil t)))
+  (let* ((profile (s3-publish-get-credentials
+                   (s3-publish-get-profile profile-name)))
+         (bucket (plist-get profile :bucket))
+         (endpoint (plist-get profile :endpoint))
+         (host-base (replace-regexp-in-string "^https?://" "" endpoint))
+         (host-base (replace-regexp-in-string "/$" "" host-base))
+         (host-base (if (string-prefix-p (concat bucket ".") host-base)
+                        (replace-regexp-in-string
+                         (concat "^" (regexp-quote (concat bucket ".")))
+                         "" host-base)
+                      host-base))
+         (index-url (format "https://%s.%s/%s"
+                            bucket host-base s3-publish-html-index-filename)))
+
+    ;; Check if RSS feed is enabled for this profile
+    (unless (plist-get profile :rss-feed)
+      (if (y-or-n-p "RSS feed not enabled for this profile. Enable it now? ")
+          (let* ((edited-profile
+                  (append profile
+                          (list :rss-feed t
+                                :rss-title (read-string "RSS feed title: "
+                                                       (format "%s Files" profile-name))
+                                :rss-desc (read-string "RSS feed description: "
+                                                      "Files published from Emacs")
+                                :rss-link (format "https://%s.%s" bucket host-base)))))
+            (setq s3-publish-profiles
+                  (mapcar (lambda (p)
+                            (if (string= (plist-get p :name) profile-name)
+                                edited-profile
+                              p))
+                          s3-publish-profiles))
+            (s3-publish-save-profiles)
+            (message "RSS feed enabled for profile '%s'" profile-name))
+        (error "Cannot view index - RSS feed not enabled")))
+
+    ;; Try to download the existing index
+    (let ((html-index (s3-publish-download-html-index profile)))
+      (if html-index
+          ;; If index exists, open it in browser
+          (browse-url index-url)
+        ;; If index doesn't exist yet, offer to create it
+        (when (y-or-n-p "HTML index doesn't exist yet. Create a new empty index? ")
+          ;; Create and upload a new empty index
+          (let* ((new-index (s3-publish-create-new-html-index profile))
+                 (index-temp-file (make-temp-file "s3-publish-index-" nil ".html")))
+            (unwind-protect
+                (progn
+                  ;; Write index to temp file
+                  (with-temp-file index-temp-file (insert new-index))
+
+                  ;; Upload the index to S3
+                  (let* ((s3cmd-config (s3-publish-generate-s3cmd-config profile))
+                         (bucket (plist-get profile :bucket))
+                         (index-s3-uri (format "s3://%s/%s" bucket s3-publish-html-index-filename))
+                         (acl-args (if (plist-get profile :public-acl)
+                                      (list "--acl-public")
+                                    nil))
+                         (index-args (append (list "--config" s3cmd-config)
+                                            acl-args
+                                            (list "put" index-temp-file index-s3-uri)
+                                            (list "--mime-type=text/html")))
+                         (output-buffer (generate-new-buffer "*s3-publish-upload-index*"))
+                         index-exit-code)
+
+                    (unwind-protect
+                        (progn
+                          ;; Upload the HTML index
+                          (setq index-exit-code
+                                (apply 'call-process "s3cmd" nil output-buffer nil index-args))
+                          (if (zerop index-exit-code)
+                              (progn
+                                (message "Created new HTML index for %s" profile-name)
+                                (browse-url index-url))
+                            (with-current-buffer output-buffer
+                              (error "Failed to upload HTML index: %s" (buffer-string)))))
+                      (kill-buffer output-buffer))))
+
+              ;; Clean up temp files
+              (when (file-exists-p index-temp-file)
+                (delete-file index-temp-file)))))))))
 
 (defun s3-publish-bucket-lifecycle (profile-name days-input)
   "Set or delete the S3 lifecycle expiration policy for the bucket PROFILE-NAME.
@@ -570,12 +970,115 @@ copied to the kill ring and displayed."
          (result (s3-publish-upload-multiple-files files profile)))
     result))
 
+;; Function to remove entries from feeds
+(defun s3-publish-remove-from-feed (profile file-url)
+  "Remove an entry with FILE-URL from the RSS feed and HTML index for PROFILE.
+Returns t if successful, nil if no modification was needed."
+  ;; Only proceed if RSS feed is enabled for this profile
+  (when (plist-get profile :rss-feed)
+    (let ((current-feed (s3-publish-download-feed profile))
+          (current-index (s3-publish-download-html-index profile))
+          (modified nil))
+      
+      ;; Only proceed if we have existing feeds to modify
+      (when (or current-feed current-index)
+        ;; Update the RSS feed
+        (when current-feed
+          (with-temp-buffer
+            (insert current-feed)
+            (goto-char (point-min))
+            ;; Look for items with the matching URL
+            (let ((case-fold-search t)
+                  (url-pattern (regexp-quote file-url)))
+              (when (re-search-forward (format "<item>\\(.*?\\)<link>.*?%s.*?</link>\\(.*?\\)</item>" url-pattern) nil t)
+                (replace-match "")
+                (setq modified t)
+                ;; Update the lastBuildDate
+                (goto-char (point-min))
+                (when (re-search-forward "<lastBuildDate>[^<]*</lastBuildDate>" nil t)
+                  (replace-match (format "<lastBuildDate>%s</lastBuildDate>"
+                                         (s3-publish-format-rfc822-date (current-time)))))))
+            (when modified
+              (setq current-feed (buffer-string)))))
+        
+        ;; Update the HTML index
+        (when current-index
+          (with-temp-buffer
+            (insert current-index)
+            (goto-char (point-min))
+            ;; Look for entries with the matching URL
+            (let ((case-fold-search t)
+                  (url-pattern (regexp-quote file-url)))
+              (when (re-search-forward (format "<div class=\"entry\">\\(.*?\\)<a href=\".*?%s.*?\"\\(.*?\\)</div>\\s-*</div>" url-pattern) nil t)
+                (replace-match "")
+                (setq modified t))))
+            (when modified
+              (setq current-index (buffer-string))))
+        
+        ;; If we modified either feed, upload the updates
+        (when modified
+          ;; Save the updated feeds to temp files
+          (let ((feed-temp-file (when current-feed (make-temp-file "s3-publish-feed-" nil ".xml")))
+                (index-temp-file (when current-index (make-temp-file "s3-publish-index-" nil ".html"))))
+            (unwind-protect
+                (progn
+                  ;; Write feeds to temp files
+                  (when feed-temp-file
+                    (with-temp-file feed-temp-file (insert current-feed)))
+                  (when index-temp-file
+                    (with-temp-file index-temp-file (insert current-index)))
+                  
+                  ;; Upload the feeds to S3
+                  (let* ((s3cmd-config (s3-publish-generate-s3cmd-config profile))
+                         (bucket (plist-get profile :bucket))
+                         (acl-args (if (plist-get profile :public-acl)
+                                       (list "--acl-public")
+                                     nil))
+                         (output-buffer (generate-new-buffer "*s3-publish-upload-feed*")))
+                    
+                    (unwind-protect
+                        (progn
+                          ;; Upload the RSS feed if we modified it
+                          (when feed-temp-file
+                            (let* ((feed-s3-uri (format "s3://%s/%s" bucket s3-publish-rss-filename))
+                                   (feed-args (append (list "--config" s3cmd-config)
+                                                     acl-args
+                                                     (list "put" feed-temp-file feed-s3-uri)
+                                                     (list "--mime-type=application/rss+xml")))
+                                   (feed-exit-code (apply 'call-process "s3cmd" nil output-buffer nil feed-args)))
+                              (unless (zerop feed-exit-code)
+                                (with-current-buffer output-buffer
+                                  (error "Failed to upload updated RSS feed: %s" (buffer-string))))))
+                          
+                          ;; Upload the HTML index if we modified it
+                          (when index-temp-file
+                            (let* ((index-s3-uri (format "s3://%s/%s" bucket s3-publish-html-index-filename))
+                                   (index-args (append (list "--config" s3cmd-config)
+                                                      acl-args
+                                                      (list "put" index-temp-file index-s3-uri)
+                                                      (list "--mime-type=text/html")))
+                                   (index-exit-code (apply 'call-process "s3cmd" nil output-buffer nil index-args)))
+                              (unless (zerop index-exit-code)
+                                (with-current-buffer output-buffer
+                                  (error "Failed to upload updated HTML index: %s" (buffer-string))))))
+                          
+                          (message "Updated RSS feed and HTML index for %s - removed entry" (plist-get profile :name)))
+                      (kill-buffer output-buffer))))
+              
+              ;; Clean up temp files
+              (when (and feed-temp-file (file-exists-p feed-temp-file))
+                (delete-file feed-temp-file))
+              (when (and index-temp-file (file-exists-p index-temp-file))
+                (delete-file index-temp-file))))
+          t)))))
+
+;; Update s3-publish--remove-file-internal to update the feed
 (defun s3-publish--remove-file-internal (file profile)
   "Remove FILE from S3 using PROFILE without prompting.
 PROFILE is a plist that must include :bucket, :endpoint, :salt,
 and credentials (:access-key and :secret-key).
-This function generates FILE’s S3 key using
-`s3-publish-get-file-key' with PROFILE’s salt,
+This function generates FILE's S3 key using
+`s3-publish-get-file-key' with PROFILE's salt,
 creates a temporary s3cmd config file, and runs:
   s3cmd --config CONFIG del s3://BUCKET/KEY
 Returns the S3 URI if successful,
@@ -584,6 +1087,19 @@ or signals an error with the output from s3cmd."
          (key (s3-publish-get-file-key file salt))
          (bucket (plist-get profile :bucket))
          (s3-uri (format "s3://%s/%s" bucket key))
+         (endpoint (plist-get profile :endpoint))
+         ;; Compute host-base: remove protocol and trailing slash.
+         (host-base (replace-regexp-in-string "^https?://" "" endpoint))
+         (host-base (replace-regexp-in-string "/$" "" host-base))
+         ;; Remove the bucket subdomain if it exactly matches.
+         (host-base (if (string-prefix-p (concat bucket ".") host-base)
+                        (replace-regexp-in-string
+                         (concat "^" (regexp-quote (concat bucket ".")))
+                         "" host-base)
+                      host-base))
+         (file-url (if (plist-get profile :public-acl)
+                       (format "https://%s.%s/%s" bucket host-base key)
+                     s3-uri))
          (s3cmd-config (s3-publish-generate-s3cmd-config profile))
          (args (list "--config" s3cmd-config "del" s3-uri))
          (output-buffer (generate-new-buffer "*s3-publish-remove-output*"))
@@ -594,77 +1110,24 @@ or signals an error with the output from s3cmd."
                 (apply 'call-process "s3cmd" nil output-buffer nil args))
           (if (zerop exit-code)
               (progn
+                ;; Update RSS feed if enabled
+                (when (and (plist-get profile :rss-feed)
+                           (plist-get profile :public-acl))
+                  (s3-publish-remove-from-feed profile file-url))
                 (message "Successfully removed %s from S3" s3-uri)
                 s3-uri)
             (with-current-buffer output-buffer
               (error "Error removing file from S3: %s" (buffer-string)))))
       (kill-buffer output-buffer))))
 
-(defun s3-publish-remove-file (file)
-  "Interactively remove FILE from S3.
-Prompts for an S3 profile (from `s3-publish-profiles') to use for removal.
-Returns the S3 URI of the removed file if successful."
-  (interactive "fFile to remove from S3: ")
-  (let* ((profile-names
-          (mapcar (lambda (p) (plist-get p :name)) s3-publish-profiles))
-         (profile-name
-          (completing-read "Select S3 profile: " profile-names nil t))
-         (profile
-          (s3-publish-get-credentials (s3-publish-get-profile profile-name))))
-    (s3-publish--remove-file-internal file profile)))
-
-
-(defun s3-publish-remove-buffer ()
-  "Remove the file associated with the current buffer from S3.
-This function calls `s3-publish-remove-file' on the current buffer's file path.
-If the buffer is not visiting a file, it signals an error."
-  (interactive)
-  (let ((file (buffer-file-name)))
-    (if file
-        (s3-publish-remove-file file)
-      (error "Current buffer is not visiting a file"))))
-
-
-
-(defun s3-publish-dired-remove-files ()
-  "In Dired, remove the marked files from S3.
-The function retrieves the marked files, then prompts for an S3 profile
-(from `s3-publish-profiles') once. It validates that all files exist and are
-not directories. Each file is then removed using the internal removal function.
-All resulting S3 URIs (one per file) are concatenated (one per line),
-copied to the kill ring, and displayed."
-  (interactive)
-  (let* ((files (dired-get-marked-files)))
-    ;; Validate that every file exists and is not a directory.
-    (unless (cl-every (lambda (f)
-                        (and (file-exists-p f)
-                             (not (file-directory-p f))))
-                      files)
-      (error
-       "One or more selected files do not exist or are not regular files"))
-    (let* ((profile-names (mapcar (lambda (p) (plist-get p :name))
-                                  s3-publish-profiles))
-           (profile-name (completing-read
-                            "Select S3 profile: " profile-names nil t))
-           (profile
-            (s3-publish-get-credentials (s3-publish-get-profile profile-name)))
-           (results (mapcar (lambda (f)
-                              (s3-publish--remove-file-internal f profile))
-                            files))
-           (result-str (string-join results "\n")))
-      (kill-new result-str)
-      (message
-       "Removed files. S3 URIs (one per line) copied to kill ring:\n%s"
-       result-str)
-      result-str)))
-
 (defun s3-publish-remove-urls (urls-string)
   "Remove multiple files from S3 given their public URLs.
 URLS-STRING is a string with one URL per line.
 Prompts for an S3 profile, then for each URL:
   - Parses the URL to extract the bucket and key.
-  - Validates that the URL’s bucket and host match the selected profile.
+  - Validates that the URL's bucket and host match the selected profile.
   - Constructs the S3 URI and invokes s3cmd to remove the object.
+  - Updates the RSS feed and HTML index if the profile has RSS enabled.
 At the end, prints how many objects were deleted."
   (interactive "sS3 URLs to remove (one per line): ")
   (let* ((lines (split-string urls-string "\n" t "[ \t\n]+"))
@@ -732,6 +1195,10 @@ At the end, prints how many objects were deleted."
                                      nil output-buffer nil args))
                         (if (zerop exit-code)
                             (progn
+                              ;; Update RSS feed if enabled
+                              (when (and (plist-get profile :rss-feed)
+                                        (plist-get profile :public-acl))
+                                (s3-publish-remove-from-feed profile url))
                               (message "Successfully removed %s" s3-uri)
                               t)
                           (with-current-buffer output-buffer
@@ -741,6 +1208,65 @@ At the end, prints how many objects were deleted."
             lines)))
       (message "Deleted %d object(s) from S3" (length results))
       (length results))))
+
+(defun s3-publish-remove-file (file)
+  "Interactively remove FILE from S3.
+Prompts for an S3 profile (from `s3-publish-profiles') to use for removal.
+Returns the S3 URI of the removed file if successful."
+  (interactive "fFile to remove from S3: ")
+  (let* ((profile-names
+          (mapcar (lambda (p) (plist-get p :name)) s3-publish-profiles))
+         (profile-name
+          (completing-read "Select S3 profile: " profile-names nil t))
+         (profile
+          (s3-publish-get-credentials (s3-publish-get-profile profile-name))))
+    (s3-publish--remove-file-internal file profile)))
+
+
+(defun s3-publish-remove-buffer ()
+  "Remove the file associated with the current buffer from S3.
+This function calls `s3-publish-remove-file' on the current buffer's file path.
+If the buffer is not visiting a file, it signals an error."
+  (interactive)
+  (let ((file (buffer-file-name)))
+    (if file
+        (s3-publish-remove-file file)
+      (error "Current buffer is not visiting a file"))))
+
+
+
+(defun s3-publish-dired-remove-files ()
+  "In Dired, remove the marked files from S3.
+The function retrieves the marked files, then prompts for an S3 profile
+(from `s3-publish-profiles') once. It validates that all files exist and are
+not directories. Each file is then removed using the internal removal function.
+All resulting S3 URIs (one per file) are concatenated (one per line),
+copied to the kill ring, and displayed."
+  (interactive)
+  (let* ((files (dired-get-marked-files)))
+    ;; Validate that every file exists and is not a directory.
+    (unless (cl-every (lambda (f)
+                        (and (file-exists-p f)
+                             (not (file-directory-p f))))
+                      files)
+      (error
+       "One or more selected files do not exist or are not regular files"))
+    (let* ((profile-names (mapcar (lambda (p) (plist-get p :name))
+                                  s3-publish-profiles))
+           (profile-name (completing-read
+                            "Select S3 profile: " profile-names nil t))
+           (profile
+            (s3-publish-get-credentials (s3-publish-get-profile profile-name)))
+           (results (mapcar (lambda (f)
+                              (s3-publish--remove-file-internal f profile))
+                            files))
+           (result-str (string-join results "\n")))
+      (kill-new result-str)
+      (message
+       "Removed files. S3 URIs (one per line) copied to kill ring:\n%s"
+       result-str)
+      result-str)))
+
 
 (defun s3-publish (&optional arg)
   "Publish to S3 in a context-aware (DWIM) way.
@@ -781,5 +1307,324 @@ ARG is the raw prefix argument."
           (error "Current buffer is not visiting a file"))
       (s3-publish-buffer)))))
 
+
+
+;; Modify the add-item-to-feed function to use the helper function
+(defun s3-publish-add-item-to-feed (feed file-url title description pubdate)
+  "Add a new item to an existing RSS FEED XML string, or update if URL exists.
+FILE-URL is the URL of the published file.
+TITLE is the title for the RSS item.
+DESCRIPTION is the description for the RSS item.
+PUBDATE is the publication date as a time value.
+If the feed already contains an item with the same URL, the existing
+item is updated with the new title, description, and date."
+  (with-temp-buffer
+    (insert feed)
+    (goto-char (point-min))
+    
+    ;; Check if an item with this URL already exists
+    (let ((match-data (s3-publish-feed-contains-url-p feed file-url)))
+      (if match-data
+          ;; If found, update the existing item
+          (save-match-data
+            (set-match-data match-data)
+            (let ((item-start (match-beginning 0))
+                  (item-end (match-end 0)))
+              (delete-region item-start item-end)
+              (goto-char item-start)
+              (insert (format "    <item>
+      <title>%s</title>
+      <link>%s</link>
+      <guid>%s</guid>
+      <description><![CDATA[%s]]></description>
+      <pubDate>%s</pubDate>
+    </item>"
+                             title
+                             file-url
+                             file-url
+                             description
+                             (s3-publish-format-rfc822-date pubdate)))))
+        ;; If not found, add a new item before the closing </channel> tag
+        (goto-char (point-min))
+        (when (re-search-forward "</channel>" nil t)
+          (goto-char (match-beginning 0))
+          (insert (format "    <item>
+      <title>%s</title>
+      <link>%s</link>
+      <guid>%s</guid>
+      <description><![CDATA[%s]]></description>
+      <pubDate>%s</pubDate>
+    </item>\n    "
+                          title
+                          file-url
+                          file-url
+                          description
+                          (s3-publish-format-rfc822-date pubdate)))))))
+    
+    ;; Update the lastBuildDate regardless of whether we added or updated
+    (goto-char (point-min))
+    (when (re-search-forward "<lastBuildDate>[^<]*</lastBuildDate>" nil t)
+      (replace-match (format "<lastBuildDate>%s</lastBuildDate>"
+                             (s3-publish-format-rfc822-date (current-time)))))
+    (buffer-string))
+
+;; Modify the add-item-to-html-index function to use the helper function
+(defun s3-publish-add-item-to-html-index (html file-url title description pubdate)
+  "Add a new item to an existing HTML index page, or update if URL exists.
+HTML is the current HTML index content.
+FILE-URL is the URL of the published file.
+TITLE is the title for the index entry.
+DESCRIPTION is the description for the index entry.
+PUBDATE is the publication date as a time value.
+If the index already contains an entry with the same URL, updates it instead."
+  (with-temp-buffer
+    (insert html)
+    
+    ;; Find the entries div and make sure it exists
+    (goto-char (point-min))
+    (unless (re-search-forward "<div class=\"entries\">" nil t)
+      (error "Invalid HTML index format - no entries div found"))
+    
+    ;; Check if an entry with this URL already exists
+    (let ((match-data (s3-publish-html-index-contains-url-p html file-url)))
+      (if match-data
+          ;; If found, update the existing entry
+          (save-match-data
+            (set-match-data match-data) 
+            (let ((entry-start (match-beginning 0))
+                  (entry-end (match-end 0)))
+              (delete-region entry-start entry-end)
+              (goto-char entry-start)
+              (insert (format "    <div class=\"entry\">
+      <h2><a href=\"%s\">%s</a></h2>
+      <div class=\"date\">%s</div>
+      <div class=\"description\">%s</div>
+      <div class=\"link\"><a href=\"%s\">%s</a></div>
+    </div>"
+                             file-url
+                             title
+                             (format-time-string "%Y-%m-%d %H:%M:%S" pubdate)
+                             description
+                             file-url
+                             file-url))))
+        ;; If not found, add a new entry at the top of the entries div
+        (goto-char (point-min))
+        (when (re-search-forward "<div class=\"entries\">" nil t)
+          (goto-char (match-end 0))
+          (insert (format "\n    <div class=\"entry\">
+      <h2><a href=\"%s\">%s</a></h2>
+      <div class=\"date\">%s</div>
+      <div class=\"description\">%s</div>
+      <div class=\"link\"><a href=\"%s\">%s</a></div>
+    </div>"
+                         file-url
+                         title
+                         (format-time-string "%Y-%m-%d %H:%M:%S" pubdate)
+                         description
+                         file-url
+                         file-url)))))
+    (buffer-string)))
+
+;; Improve the feed search function to better handle XML
+(defun s3-publish-feed-contains-url-p (feed url)
+  "Check if FEED already contains an item with the given URL.
+Returns the match data if found, nil otherwise."
+  (with-temp-buffer
+    (insert feed)
+    (goto-char (point-min))
+    (let ((case-fold-search t)
+          (url-pattern (regexp-quote url)))
+      ;; We need a more precise regex that accounts for variations in XML
+      (when (re-search-forward 
+             (format 
+              "<item>\\(\\(.\\|\n\\)*?\\)<link>\\(\\(.\\|\n\\)*?\\)%s\\(\\(.\\|\n\\)*?\\)</link>\\(\\(.\\|\n\\)*?\\)</item>" 
+              url-pattern)
+             nil t)
+        (match-data)))))
+
+;; Improve the HTML index search function
+(defun s3-publish-html-index-contains-url-p (html url)
+  "Check if HTML index already contains an entry with the given URL.
+Returns the match data if found, nil otherwise."
+  (with-temp-buffer
+    (insert html)
+    (goto-char (point-min))
+    (let ((case-fold-search t)
+          (url-pattern (regexp-quote url)))
+      ;; We need a more precise regex that accounts for variations in HTML
+      (when (re-search-forward 
+             (format 
+              "<div class=\"entry\">\\(\\(.\\|\n\\)*?\\)<a href=\"\\(\\(.\\|\n\\)*?\\)%s\\(\\(.\\|\n\\)*?\\)\"\\(\\(.\\|\n\\)*?\\)</div>\\s-*</div>"
+              url-pattern)
+             nil t)
+        (match-data)))))
+
+;; Rewrite the update feed function to directly modify the files
+(defun s3-publish-update-feed (profile file-url title description)
+  "Update the RSS feed and HTML index for PROFILE with a new file.
+FILE-URL is the URL of the newly published file.
+TITLE is the title to use for the RSS item and HTML entry.
+DESCRIPTION is the description for the RSS item and HTML entry.
+If the feed or index already contains entries with the same URL,
+they will be updated rather than duplicated."
+  ;; Only proceed if RSS feed is enabled for this profile
+  (when (plist-get profile :rss-feed)
+    (let* ((current-feed (s3-publish-download-feed profile))
+           (current-index (s3-publish-download-html-index profile))
+           (pubdate (current-time))
+           (new-feed-item (format "    <item>
+      <title>%s</title>
+      <link>%s</link>
+      <guid>%s</guid>
+      <description><![CDATA[%s]]></description>
+      <pubDate>%s</pubDate>
+    </item>"
+                                 title
+                                 file-url
+                                 file-url
+                                 description
+                                 (s3-publish-format-rfc822-date pubdate)))
+           (new-html-item (format "    <div class=\"entry\">
+      <h2><a href=\"%s\">%s</a></h2>
+      <div class=\"date\">%s</div>
+      <div class=\"description\">%s</div>
+      <div class=\"link\"><a href=\"%s\">%s</a></div>
+    </div>"
+                                 file-url
+                                 title
+                                 (format-time-string "%Y-%m-%d %H:%M:%S" pubdate)
+                                 description
+                                 file-url
+                                 file-url)))
+
+      ;; Process RSS feed
+      (let ((new-feed
+             (if (not current-feed)
+                 ;; If no feed exists, create a new one
+                 (let ((base-feed (s3-publish-create-new-rss-feed profile)))
+                   (with-temp-buffer
+                     (insert base-feed)
+                     (goto-char (point-min))
+                     (when (re-search-forward "</channel>" nil t)
+                       (goto-char (match-beginning 0))
+                       (insert "\n" new-feed-item "\n"))
+                     (buffer-string)))
+               ;; If feed exists, check for existing entry
+               (with-temp-buffer
+                 (insert current-feed)
+                 (goto-char (point-min))
+                 (let ((url-pattern (regexp-quote file-url))
+                       (found nil))
+                   ;; Look for any item with this URL
+                   (goto-char (point-min))
+                   (if (re-search-forward 
+                        (format "<item>\\(\\(.\\|\n\\)*?\\)<link>\\(\\(.\\|\n\\)*?\\)%s\\(\\(.\\|\n\\)*?\\)</link>\\(\\(.\\|\n\\)*?\\)</item>" 
+                                url-pattern)
+                        nil t)
+                       ;; If found, replace the item
+                       (progn
+                         (setq found t)
+                         (replace-match new-feed-item t t))
+                     ;; If not found, add it before closing channel tag
+                     (goto-char (point-min))
+                     (when (re-search-forward "</channel>" nil t)
+                       (goto-char (match-beginning 0))
+                       (insert "\n" new-feed-item "\n")))
+                   
+                   ;; Always update the lastBuildDate
+                   (goto-char (point-min))
+                   (when (re-search-forward "<lastBuildDate>[^<]*</lastBuildDate>" nil t)
+                     (replace-match (format "<lastBuildDate>%s</lastBuildDate>"
+                                            (s3-publish-format-rfc822-date (current-time)))))
+                   (buffer-string)))))
+            
+            ;; Process HTML index
+            (new-index
+             (if (not current-index)
+                 ;; If no index exists, create a new one with the entry
+                 (let ((base-index (s3-publish-create-new-html-index profile)))
+                   (with-temp-buffer
+                     (insert base-index)
+                     (goto-char (point-min))
+                     (when (re-search-forward "<div class=\"entries\">" nil t)
+                       (goto-char (match-end 0))
+                       (insert "\n" new-html-item))
+                     (buffer-string)))
+               ;; If index exists, check for existing entry
+               (with-temp-buffer
+                 (insert current-index)
+                 (goto-char (point-min))
+                 (let ((url-pattern (regexp-quote file-url))
+                       (found nil))
+                   ;; Look for any entry with this URL
+                   (goto-char (point-min))
+                   (if (re-search-forward 
+                        (format "<div class=\"entry\">\\(\\(.\\|\n\\)*?\\)<a href=\"\\(\\(.\\|\n\\)*?\\)%s\\(\\(.\\|\n\\)*?\\)\"\\(\\(.\\|\n\\)*?\\)</div>\\s-*</div>"
+                                url-pattern)
+                        nil t)
+                       ;; If found, replace the entry
+                       (progn
+                         (setq found t)
+                         (replace-match new-html-item t t))
+                     ;; If not found, add it to the entries div
+                     (goto-char (point-min))
+                     (when (re-search-forward "<div class=\"entries\">" nil t)
+                       (goto-char (match-end 0))
+                       (insert "\n" new-html-item)))
+                   (buffer-string))))))
+
+        ;; Save the updated feed and index to temp files
+        (let ((feed-temp-file (make-temp-file "s3-publish-feed-" nil ".xml"))
+              (index-temp-file (make-temp-file "s3-publish-index-" nil ".html")))
+          (unwind-protect
+              (progn
+                ;; Write feed and index to temp files
+                (with-temp-file feed-temp-file (insert new-feed))
+                (with-temp-file index-temp-file (insert new-index))
+
+                ;; Upload the feed to S3
+                (let* ((s3cmd-config (s3-publish-generate-s3cmd-config profile))
+                       (bucket (plist-get profile :bucket))
+                       (feed-s3-uri (format "s3://%s/%s" bucket s3-publish-rss-filename))
+                       (index-s3-uri (format "s3://%s/%s" bucket s3-publish-html-index-filename))
+                       (acl-args (if (plist-get profile :public-acl)
+                                     (list "--acl-public")
+                                   nil))
+                       (feed-args (append (list "--config" s3cmd-config)
+                                          acl-args
+                                          (list "put" feed-temp-file feed-s3-uri)
+                                          (list "--mime-type=application/rss+xml")))
+                       (index-args (append (list "--config" s3cmd-config)
+                                           acl-args
+                                           (list "put" index-temp-file index-s3-uri)
+                                           (list "--mime-type=text/html")))
+                       (output-buffer (generate-new-buffer "*s3-publish-upload-feed*"))
+                       feed-exit-code
+                       index-exit-code)
+
+                  (unwind-protect
+                      (progn
+                        ;; Upload the RSS feed
+                        (setq feed-exit-code
+                              (apply 'call-process "s3cmd" nil output-buffer nil feed-args))
+                        (unless (zerop feed-exit-code)
+                          (with-current-buffer output-buffer
+                            (error "Failed to upload RSS feed: %s" (buffer-string))))
+
+                        ;; Upload the HTML index
+                        (setq index-exit-code
+                              (apply 'call-process "s3cmd" nil output-buffer nil index-args))
+                        (unless (zerop index-exit-code)
+                          (with-current-buffer output-buffer
+                            (error "Failed to upload HTML index: %s" (buffer-string))))
+
+                        (message "Updated RSS feed and HTML index for %s" (plist-get profile :name)))
+                    (kill-buffer output-buffer))))
+
+            ;; Clean up temp files
+            (when (file-exists-p feed-temp-file)
+              (delete-file feed-temp-file))
+            (when (file-exists-p index-temp-file)
+              (delete-file index-temp-file))))))))
 
 (provide 's3-publish)
