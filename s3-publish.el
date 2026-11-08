@@ -18,6 +18,8 @@
 ;;
 
 (require 'auth-source)
+(require 'cl-lib)
+(require 'subr-x)
 (require 'dired)
 (require 'ox-html)
 
@@ -610,7 +612,134 @@ If the upload fails, it signals an error with the error message."
               (error "Upload failed: %s" (buffer-string)))))
       (kill-buffer output-buffer))))
 
-;; Update the org buffer publication function to handle feed entries better
+;;; Shared publishing core ----------------------------------------------------
+;; Both the Org and Markdown publishers go through this, so the two stay
+;; feature-for-feature identical.
+
+(defun s3-publish--host-base (profile)
+  "Return PROFILE's endpoint host, without protocol or leading bucket label."
+  (let* ((bucket (plist-get profile :bucket))
+         (endpoint (plist-get profile :endpoint))
+         (host-base (replace-regexp-in-string "^https?://" "" endpoint))
+         (host-base (replace-regexp-in-string "/$" "" host-base)))
+    (if (string-prefix-p (concat bucket ".") host-base)
+        (replace-regexp-in-string
+         (concat "^" (regexp-quote (concat bucket "."))) "" host-base)
+      host-base)))
+
+(defun s3-publish--object-url (profile key)
+  "Return the URL for KEY in PROFILE's bucket.
+A public https URL when PROFILE has :public-acl, otherwise an s3:// URI."
+  (let ((bucket (plist-get profile :bucket)))
+    (if (plist-get profile :public-acl)
+        (format "https://%s.%s/%s" bucket (s3-publish--host-base profile) key)
+      (format "s3://%s/%s" bucket key))))
+
+(defun s3-publish--select-profile ()
+  "Prompt for a profile from `s3-publish-profiles' and return it with credentials."
+  (let* ((profile-names (mapcar (lambda (p) (plist-get p :name))
+                                s3-publish-profiles))
+         (default (if (member "default" profile-names)
+                      "default"
+                    (car profile-names)))
+         (profile-name (completing-read "Select S3 profile: "
+                                        profile-names nil t nil nil default)))
+    (s3-publish-get-credentials (s3-publish-get-profile profile-name))))
+
+(defun s3-publish--upload-no-feed (file profile key &optional mime-type)
+  "Upload FILE to PROFILE's bucket under KEY without touching the RSS feed.
+MIME-TYPE, when non-nil, is passed to s3cmd as --mime-type.
+Returns the resulting URL (see `s3-publish--object-url')."
+  (let* ((s3cmd-config (s3-publish-generate-s3cmd-config profile))
+         (bucket (plist-get profile :bucket))
+         (s3-uri (format "s3://%s/%s" bucket key))
+         (acl-args (if (plist-get profile :public-acl) (list "--acl-public") nil))
+         (mime-args (if mime-type (list (concat "--mime-type=" mime-type)) nil))
+         (args (append (list "--config" s3cmd-config) acl-args mime-args
+                       (list "put" file s3-uri)
+                       (list "--add-header=x-amz-tagging: temp=temp")))
+         (output-buffer (generate-new-buffer "*s3-publish-upload-output*"))
+         exit-code)
+    (unwind-protect
+        (progn
+          (setq exit-code (apply 'call-process "s3cmd" nil output-buffer nil args))
+          (if (zerop exit-code)
+              (s3-publish--object-url profile key)
+            (with-current-buffer output-buffer
+              (error "Upload failed: %s" (buffer-string)))))
+      (kill-buffer output-buffer))))
+
+(defun s3-publish--publish-document (source-file export-fn title description source-label)
+  "Publish SOURCE-FILE and an HTML rendering of it to S3.
+
+SOURCE-FILE is backed up under its own extension.  EXPORT-FN is called
+with no arguments and must return the path of a freshly exported HTML
+file.  Both objects share one key derived from SOURCE-FILE, differing
+only in extension.  A link back to the source, labelled SOURCE-LABEL, is
+appended to the bottom of the HTML.  TITLE and DESCRIPTION feed the RSS
+feed and HTML index, where both files appear as a single entry.
+
+Returns the HTML URL, which is also copied to the kill ring."
+  (let* ((profile (s3-publish--select-profile))
+         (salt (plist-get profile :salt))
+         (full-key (s3-publish-get-file-key source-file salt))
+         (base-key (file-name-sans-extension full-key))
+         (source-ext (or (file-name-extension source-file t) ""))
+         (source-key (concat base-key source-ext))
+         (html-key (concat base-key ".html"))
+         (source-url (s3-publish--upload-no-feed
+                      source-file profile source-key "text/plain; charset=utf-8"))
+         (html-file (funcall export-fn)))
+    (setq html-file (if (file-symlink-p html-file) (file-truename html-file) html-file))
+    ;; Append a link to the source file at the bottom of the HTML.
+    (with-temp-buffer
+      (insert-file-contents html-file)
+      (let ((footer (format "<div id=\"org-download\"><a href=\"%s\">View %s</a></div>\n"
+                            source-url source-label)))
+        (goto-char (point-max))
+        (if (search-backward "</body>" nil t)
+            (progn (goto-char (match-beginning 0)) (insert footer))
+          (progn (goto-char (point-max)) (insert "\n" footer))))
+      (write-region (point-min) (point-max) html-file nil 'quiet))
+    (let ((html-url (s3-publish--upload-no-feed html-file profile html-key "text/html")))
+      (when (and (plist-get profile :rss-feed)
+                 (plist-get profile :public-acl))
+        (s3-publish-update-feed
+         profile html-url title
+         (format "%s<p>View: <a href=\"%s\">HTML</a> | <a href=\"%s\">%s</a></p>"
+                 description html-url source-url source-label)))
+      (kill-new html-url)
+      (message "%s" html-url)
+      html-url)))
+
+(defun s3-publish--export-buffer-to-html ()
+  "Export the current Org buffer to HTML and return an absolute file name.
+`org-html-export-to-html' returns a name relative to the Org buffer's
+`default-directory', which stops resolving once another buffer is current,
+so it is expanded here while that buffer is still active."
+  (let ((html-file (expand-file-name (org-html-export-to-html))))
+    (if (file-symlink-p html-file) (file-truename html-file) html-file)))
+
+(defun s3-publish--org-string-export-to-html (org-text)
+  "Export ORG-TEXT, a string of Org markup, to a temporary HTML file.
+Returns the path of the exported file.  Uses Org's own HTML exporter, so
+the result is styled exactly like any other Org export."
+  (let* ((tmp-dir (make-temp-file "s3-publish-export-" t))
+         (org-file (expand-file-name "export.org" tmp-dir))
+         (buffer nil))
+    (with-temp-file org-file (insert org-text))
+    (unwind-protect
+        (progn
+          (setq buffer (find-file-noselect org-file))
+          (with-current-buffer buffer
+            (s3-publish--export-buffer-to-html)))
+      (when (buffer-live-p buffer)
+        (with-current-buffer buffer (set-buffer-modified-p nil))
+        (kill-buffer buffer)))))
+
+
+;;; Org publishing ------------------------------------------------------------
+
 (defun s3-publish-org-buffer ()
   "Export the current Org buffer to HTML and upload it to S3.
 Before exporting, save the buffer and back up the original .org file to S3.
@@ -620,111 +749,480 @@ A link to the .org file is appended to the bottom of the HTML file.
 Only the HTML file URL is displayed and copied to the kill ring.
 When updating the RSS feed, both files are grouped as a single entry."
   (interactive)
-  ;; Save the current buffer if modified.
   (when (and (buffer-file-name) (buffer-modified-p))
     (save-buffer))
-  (let* ((org-file (buffer-file-name))
-         (profile-names (mapcar (lambda (p) (plist-get p :name))
-                                s3-publish-profiles))
-         (default (if (member "default" profile-names)
-                      "default"
-                    (car profile-names)))
-         (profile-name (completing-read "Select S3 profile: " profile-names nil t nil nil default))
-         (profile (s3-publish-get-credentials (s3-publish-get-profile profile-name)))
-         (salt (plist-get profile :salt))
-         ;; Compute the full key using the org file and salt, then strip its extension.
-         (full-key (s3-publish-get-file-key org-file salt))
-         (base-key (file-name-sans-extension full-key))
-         (org-key (concat base-key ".org"))
-         (html-key (concat base-key ".html"))
-         ;; Extract title and description from org file for RSS feed
-         (org-title (or (save-excursion
-                          (goto-char (point-min))
-                          (and (re-search-forward "^#\\+TITLE:\\s-*\\(.*\\)$" nil t)
-                               (match-string 1)))
-                        (file-name-nondirectory org-file)))
-         (org-description (or (save-excursion
-                                (goto-char (point-min))
-                                (and (re-search-forward "^#\\+DESCRIPTION:\\s-*\\(.*\\)$" nil t)
-                                     (match-string 1)))
-                              (format "Published on %s" (format-time-string "%Y-%m-%d %H:%M")))))
-    (cl-labels ((get-public-url (bucket key host-base)
-                  (format "https://%s.%s/%s" bucket host-base key))
-                (upload-file-no-feed (file profile key)
-                  "Upload file without updating the RSS feed"
-                  (let* ((s3cmd-config (s3-publish-generate-s3cmd-config profile))
-                         (bucket (plist-get profile :bucket))
-                         (endpoint (plist-get profile :endpoint))
-                         (host-base (replace-regexp-in-string "^https?://" "" endpoint))
-                         (host-base (replace-regexp-in-string "/$" "" host-base))
-                         (host-base (if (string-prefix-p (concat bucket ".") host-base)
-                                        (replace-regexp-in-string (concat "^" (regexp-quote (concat bucket "."))) "" host-base)
-                                      host-base))
-                         (s3-uri (format "s3://%s/%s" bucket key))
-                         (acl-args (if (plist-get profile :public-acl)
-                                       (list "--acl-public")
-                                     nil))
-                         (args (append (list "--config" s3cmd-config) acl-args
-                                       (list "put" file s3-uri)
-                                       (list "--add-header=x-amz-tagging: temp=temp")))
-                         (output-buffer (generate-new-buffer "*s3-publish-upload-output*"))
-                         exit-code)
-                    (unwind-protect
-                        (progn
-                          (setq exit-code (apply 'call-process "s3cmd" nil output-buffer nil args))
-                          (if (zerop exit-code)
-                              (let ((url (if (plist-get profile :public-acl)
-                                             (get-public-url bucket key host-base)
-                                           s3-uri)))
-                                url)
-                            (with-current-buffer output-buffer
-                              (error "Upload failed: %s" (buffer-string)))))
-                      (kill-buffer output-buffer)))))
+  (let ((org-file (buffer-file-name)))
+    (unless org-file
+      (error "Current org buffer is not visiting a file"))
+    (let ((title (or (save-excursion
+                       (goto-char (point-min))
+                       (and (re-search-forward "^#\\+TITLE:\\s-*\\(.*\\)$" nil t)
+                            (match-string 1)))
+                     (file-name-nondirectory org-file)))
+          (description (or (save-excursion
+                             (goto-char (point-min))
+                             (and (re-search-forward "^#\\+DESCRIPTION:\\s-*\\(.*\\)$" nil t)
+                                  (match-string 1)))
+                           (format "Published on %s"
+                                   (format-time-string "%Y-%m-%d %H:%M"))))
+          (buffer (current-buffer)))
+      (s3-publish--publish-document
+       org-file
+       (lambda () (with-current-buffer buffer (s3-publish--export-buffer-to-html)))
+       title description "Org source"))))
 
-      ;; Backup the original .org file (without updating the feed yet)
-      (let ((org-url (upload-file-no-feed org-file profile org-key)))
-        ;; Export the Org buffer to an HTML file.
-        (let* ((html-file (org-html-export-to-html))
-               (html-file (if (file-symlink-p html-file)
-                              (file-truename html-file)
-                            html-file)))
-          ;; Insert a link to the .org file at the bottom of the HTML.
-          (with-temp-buffer
-            (insert-file-contents html-file)
-            (goto-char (point-max))
-            (if (search-backward "</body>" nil t)
-                (progn
-                  (goto-char (match-beginning 0))
-                  (insert (format "<div id=\"org-download\"><a href=\"%s\">View Org file source</a></div>\n" org-url)))
+
+;;; Markdown -> Org conversion ------------------------------------------------
+
+(defcustom s3-publish-markdown-to-org-command nil
+  "Optional shell command converting Markdown to Org markup.
+
+When nil (the default) the built-in converter
+`s3-publish-markdown-to-org' is used, which needs no external programs.
+When set to a string, that command is run with the Markdown text on
+standard input and must write Org markup to standard output, e.g.
+
+  \"pandoc -f gfm -t org\"
+
+Either way the resulting Org markup is rendered by Org's own HTML
+exporter, so published Markdown looks identical to published Org."
+  :type '(choice (const :tag "Built-in converter" nil)
+                 (string :tag "Shell command"))
+  :group 's3-publish)
+
+(defconst s3-publish--md-hr-regexp
+  "^[ \t]*\\(\\(-[ \t]*\\)\\{3,\\}\\|\\(\\*[ \t]*\\)\\{3,\\}\\|\\(_[ \t]*\\)\\{3,\\}\\)$"
+  "Regexp matching a Markdown thematic break.")
+
+;; Sentinel characters standing in for Org emphasis markers while inline
+;; conversion runs, so that freshly written markers are never re-scanned.
+(defconst s3-publish--md-bold-open (string 1))
+(defconst s3-publish--md-bold-close (string 2))
+(defconst s3-publish--md-ital-open (string 3))
+(defconst s3-publish--md-ital-close (string 4))
+
+(defun s3-publish--md-fence (line)
+  "If LINE opens or closes a fenced code block, return (TOKEN . LANG).
+TOKEN is the run of backticks or tildes, LANG the info string."
+  (when (string-match "^[ \t]*\\(```+\\|~~~+\\)[ \t]*\\([^ \t`~]*\\)" line)
+    (cons (match-string 1 line) (match-string 2 line))))
+
+(defun s3-publish--md-fence-close-p (line token)
+  "Return non-nil if LINE closes a fenced block opened with TOKEN."
+  (string-match-p (concat "^[ \t]*" (regexp-quote token) "[ \t]*$") line))
+
+(defun s3-publish--md-unquote (string)
+  "Trim STRING and strip one layer of surrounding single or double quotes."
+  (let ((s (string-trim string)))
+    (if (and (> (length s) 1)
+             (or (and (string-prefix-p "\"" s) (string-suffix-p "\"" s))
+                 (and (string-prefix-p "'" s) (string-suffix-p "'" s))))
+        (substring s 1 -1)
+      s)))
+
+(defun s3-publish--md-inline-to-org (text)
+  "Convert inline Markdown markup in TEXT to Org markup.
+Code spans and backslash escapes are protected from the other passes."
+  (with-temp-buffer
+    (insert text)
+    (let ((protected '())
+          (count 0))
+      (cl-flet ((protect (regexp group kind)
+                  ;; Replace each match of REGEXP with a placeholder, stashing
+                  ;; GROUP's text together with KIND for later restoration.
+                  (goto-char (point-min))
+                  (while (re-search-forward regexp nil t)
+                    (push (cons kind (match-string group)) protected)
+                    (replace-match (format "%c%d%c" 0 count 0) t t)
+                    (setq count (1+ count))))
+                (rewrite (regexp replacement)
+                  (goto-char (point-min))
+                  (while (re-search-forward regexp nil t)
+                    (replace-match replacement t))))
+        ;; 1. Protect backslash escapes and inline code spans.
+        (protect "\\\\\\([][*_`~()#+.!>|-]\\)" 1 'raw)
+        (protect "``\\([^\n]+?\\)``" 1 'code)
+        (protect "`\\([^`\n]+?\\)`" 1 'code)
+        ;; 2. Images, links, autolinks.  Images first: ![alt](url) vs [t](url).
+        (rewrite "!\\[\\([^][]*\\)\\]([ \t]*\\([^) \t]+\\)[^)]*)" "[[\\2]]")
+        (rewrite "\\[\\([^][]*\\)\\]([ \t]*\\([^) \t]+\\)[^)]*)" "[[\\2][\\1]]")
+        (rewrite "<\\(\\(?:https?\\|mailto\\):[^> \t]+\\)>" "[[\\1]]")
+        ;; 3. Footnote references and definitions.
+        (rewrite "^\\[\\^\\([^]]+\\)\\]:[ \t]*" "[fn:\\1] ")
+        (rewrite "\\[\\^\\([^]]+\\)\\]" "[fn:\\1]")
+        ;; 4. Emphasis, widest markers first, writing sentinels not markers.
+        (rewrite "\\*\\*\\*\\([^*\n]+?\\)\\*\\*\\*"
+                 (concat s3-publish--md-bold-open s3-publish--md-ital-open
+                         "\\1"
+                         s3-publish--md-ital-close s3-publish--md-bold-close))
+        (rewrite "\\*\\*\\([^*\n]+?\\)\\*\\*"
+                 (concat s3-publish--md-bold-open "\\1" s3-publish--md-bold-close))
+        (rewrite "___\\([^_\n]+?\\)___"
+                 (concat s3-publish--md-bold-open s3-publish--md-ital-open
+                         "\\1"
+                         s3-publish--md-ital-close s3-publish--md-bold-close))
+        (rewrite "__\\([^_\n]+?\\)__"
+                 (concat s3-publish--md-bold-open "\\1" s3-publish--md-bold-close))
+        (rewrite "~~\\([^~\n]+?\\)~~" "+\\1+")
+        (rewrite "\\(^\\|[^*[:alnum:]]\\)\\*\\([^*\n]+?\\)\\*"
+                 (concat "\\1" s3-publish--md-ital-open "\\2" s3-publish--md-ital-close))
+        (rewrite "\\(^\\|[^[:alnum:]_]\\)_\\([^_\n]+?\\)_\\($\\|[^[:alnum:]_]\\)"
+                 (concat "\\1" s3-publish--md-ital-open "\\2"
+                         s3-publish--md-ital-close "\\3"))
+        ;; 5. Turn sentinels into real Org emphasis markers.
+        (rewrite (regexp-quote s3-publish--md-bold-open) "*")
+        (rewrite (regexp-quote s3-publish--md-bold-close) "*")
+        (rewrite (regexp-quote s3-publish--md-ital-open) "/")
+        (rewrite (regexp-quote s3-publish--md-ital-close) "/")
+        ;; 6. Restore protected spans.
+        (setq protected (nreverse protected))
+        (dotimes (i count)
+          (let ((entry (nth i protected)))
+            (goto-char (point-min))
+            (when (re-search-forward (format "%c%d%c" 0 i 0) nil t)
+              (replace-match (if (eq (car entry) 'code)
+                                 (concat "=" (cdr entry) "=")
+                               (cdr entry))
+                             t t))))))
+    (buffer-string)))
+
+(defun s3-publish--md-strip-frontmatter (lines)
+  "Strip YAML front matter from LINES.
+Returns a list (REMAINING-LINES TITLE DESCRIPTION); TITLE and DESCRIPTION
+are nil when absent.  LINES is returned unchanged if the block never closes."
+  (if (and lines (string-match-p "^---[ \t]*$" (car lines)))
+      (let ((rest (cdr lines))
+            (closed nil)
+            title description)
+        (while (and rest (not closed))
+          (let ((line (car rest)))
+            (setq rest (cdr rest))
+            (cond
+             ((string-match-p "^\\(---\\|\\.\\.\\.\\)[ \t]*$" line)
+              (setq closed t))
+             ((string-match "^title:[ \t]*\\(.*\\)$" line)
+              (setq title (s3-publish--md-unquote (match-string 1 line))))
+             ((string-match "^\\(description\\|summary\\):[ \t]*\\(.*\\)$" line)
+              (setq description (s3-publish--md-unquote (match-string 2 line)))))))
+        (if closed (list rest title description) (list lines nil nil)))
+    (list lines nil nil)))
+
+(defun s3-publish--md-normalize-setext (lines)
+  "Rewrite setext headings in LINES into ATX form, leaving code fences alone."
+  (let ((out '())
+        (in-fence nil)
+        (token nil))
+    (while lines
+      (let ((line (car lines))
+            (next (cadr lines)))
+        (cond
+         (in-fence
+          (when (s3-publish--md-fence-close-p line token)
+            (setq in-fence nil token nil))
+          (push line out)
+          (setq lines (cdr lines)))
+         ((s3-publish--md-fence line)
+          (setq token (car (s3-publish--md-fence line)) in-fence t)
+          (push line out)
+          (setq lines (cdr lines)))
+         ((and next
+               (not (string-match-p "^[ \t]*$" line))
+               (not (string-match-p "^[ \t]*[#>|]" line))
+               (not (string-match-p "^[ \t]*[-*+][ \t]" line))
+               (string-match-p "^=\\{2,\\}[ \t]*$" next))
+          (push (concat "# " (string-trim line)) out)
+          (setq lines (cddr lines)))
+         ((and next
+               (not (string-match-p "^[ \t]*$" line))
+               (not (string-match-p "^[ \t]*[#>|]" line))
+               (not (string-match-p "^[ \t]*[-*+][ \t]" line))
+               (string-match-p "^-\\{2,\\}[ \t]*$" next))
+          (push (concat "## " (string-trim line)) out)
+          (setq lines (cddr lines)))
+         (t
+          (push line out)
+          (setq lines (cdr lines))))))
+    (nreverse out)))
+
+(defun s3-publish--md-atx-level (line)
+  "Return the ATX heading level of LINE, or nil if LINE is not a heading."
+  (when (string-match "^\\(#\\{1,6\\}\\)[ \t]+" line)
+    (length (match-string 1 line))))
+
+(defun s3-publish--md-count-h1 (lines)
+  "Count level-1 ATX headings in LINES, ignoring fenced code blocks."
+  (let ((count 0) (in-fence nil) (token nil))
+    (dolist (line lines)
+      (cond
+       (in-fence
+        (when (s3-publish--md-fence-close-p line token)
+          (setq in-fence nil token nil)))
+       ((s3-publish--md-fence line)
+        (setq token (car (s3-publish--md-fence line)) in-fence t))
+       ((eq (s3-publish--md-atx-level line) 1)
+        (setq count (1+ count)))))
+    count))
+
+(defun s3-publish--md-table-rule (row)
+  "Return an Org table rule row matching the column count of ROW."
+  (let ((cells (split-string (string-trim row "[ \t|]+" "[ \t|]+") "|")))
+    (concat "|" (mapconcat (lambda (_) "---") cells "+") "|")))
+
+(defun s3-publish--md-table-separator-p (line)
+  "Return non-nil if LINE is a Markdown table header separator."
+  (and (string-match-p "^[ \t]*|" line)
+       (string-match-p "^[ \t]*|[ \t:|-]*-[ \t:|-]*$" line)))
+
+(defun s3-publish--md-convert-lines (lines shift)
+  "Convert Markdown LINES to a list of Org lines.
+SHIFT is subtracted from every ATX heading level; headings that fall below
+level 1 are dropped, which is how a promoted title is removed from the body."
+  (let ((out '())
+        (in-fence nil)
+        (token nil)
+        (lang nil))
+    (while lines
+      (let ((line (car lines)))
+        (setq lines (cdr lines))
+        (cond
+         ;; Inside a fenced code block: pass through verbatim, escaping lines
+         ;; that Org would otherwise read as markup.
+         (in-fence
+          (if (s3-publish--md-fence-close-p line token)
               (progn
-                (goto-char (point-max))
-                (insert (format "\n<div id=\"org-download\"><a href=\"%s\">View Org file source</a></div>\n" org-url))))
-            (write-region (point-min) (point-max) html-file nil 'quiet))
+                (push (if (string= lang "") "#+end_example" "#+end_src") out)
+                (setq in-fence nil token nil lang nil))
+            (push (if (string-match-p "^[*,]\\|^#\\+" line) (concat "," line) line)
+                  out)))
+         ;; Opening fence.
+         ((s3-publish--md-fence line)
+          (let ((fence (s3-publish--md-fence line)))
+            (setq token (car fence) lang (cdr fence) in-fence t)
+            (push (if (string= lang "")
+                      "#+begin_example"
+                    (format "#+begin_src %s" lang))
+                  out)))
+         ;; Thematic break.  Checked before lists so that "***" and "---"
+         ;; are not mistaken for bullets.
+         ((string-match-p s3-publish--md-hr-regexp line)
+          (push "-----" out))
+         ;; ATX heading.
+         ((s3-publish--md-atx-level line)
+          (string-match "^\\(#\\{1,6\\}\\)[ \t]+\\(.*?\\)[ \t]*#*[ \t]*$" line)
+          (let ((level (- (length (match-string 1 line)) shift))
+                (text (match-string 2 line)))
+            (when (>= level 1)
+              (push (concat (make-string level ?*) " "
+                            (s3-publish--md-inline-to-org text))
+                    out))))
+         ;; Blockquote: gather the run, convert its contents, wrap it.
+         ((string-match-p "^[ \t]*>" line)
+          (let ((quoted '()))
+            (push (replace-regexp-in-string "^[ \t]*>[ \t]?" "" line) quoted)
+            (while (and lines (string-match-p "^[ \t]*>" (car lines)))
+              (push (replace-regexp-in-string "^[ \t]*>[ \t]?" "" (car lines)) quoted)
+              (setq lines (cdr lines)))
+            (push "#+begin_quote" out)
+            (dolist (inner (s3-publish--md-convert-lines (nreverse quoted) 0))
+              (push inner out))
+            (push "#+end_quote" out)))
+         ;; Table rows.
+         ((s3-publish--md-table-separator-p line)
+          (push (s3-publish--md-table-rule line) out))
+         ((string-match-p "^[ \t]*|" line)
+          (push (s3-publish--md-inline-to-org (string-trim-right line)) out))
+         ;; Unordered list item.  Org reads "*" at column 0 as a heading, so
+         ;; every bullet is normalised to "-".
+         ((string-match "^\\([ \t]*\\)[-*+][ \t]+\\(.*\\)$" line)
+          (let ((indent (match-string 1 line))
+                (body (match-string 2 line)))
+            (setq body (replace-regexp-in-string "^\\[[xX]\\][ \t]+" "[X] " body))
+            (setq body (replace-regexp-in-string "^\\[ \\][ \t]+" "[ ] " body))
+            (push (concat indent "- " (s3-publish--md-inline-to-org body)) out)))
+         ;; Ordered list item.
+         ((string-match "^\\([ \t]*\\)\\([0-9]+\\)[.)][ \t]+\\(.*\\)$" line)
+          (push (concat (match-string 1 line) (match-string 2 line) ". "
+                        (s3-publish--md-inline-to-org (match-string 3 line)))
+                out))
+         ;; Blank line.
+         ((string-match-p "^[ \t]*$" line)
+          (push "" out))
+         ;; Ordinary text.
+         (t
+          (let ((converted (s3-publish--md-inline-to-org line)))
+            ;; Keep leading markup from being read as Org structure.
+            (cond
+             ((string-prefix-p "*" converted) (setq converted (concat " " converted)))
+             ((string-prefix-p "#+" converted) (setq converted (concat "," converted))))
+            (push converted out))))))
+    ;; An unterminated fence still needs closing or Org swallows the rest.
+    (when in-fence
+      (push (if (string= lang "") "#+end_example" "#+end_src") out))
+    (nreverse out)))
 
-          ;; Upload the modified HTML file
-          (let* ((html-url (upload-file-no-feed html-file profile html-key))
-                 (bucket (plist-get profile :bucket))
-                 (endpoint (plist-get profile :endpoint))
-                 (host-base (replace-regexp-in-string "^https?://" "" endpoint))
-                 (host-base (replace-regexp-in-string "/$" "" host-base))
-                 (host-base (if (string-prefix-p (concat bucket ".") host-base)
-                                (replace-regexp-in-string (concat "^" (regexp-quote (concat bucket "."))) "" host-base)
-                              host-base)))
+(defun s3-publish-markdown-to-org (markdown)
+  "Convert MARKDOWN text to Org markup and return it as a string.
 
-            ;; Now update RSS feed with a single entry containing links to both files
-            (when (and (plist-get profile :rss-feed)
-                       (plist-get profile :public-acl))
-              ;; Create a more comprehensive description that includes both links
-              (let* ((combined-description
-                      (format "%s<p>View: <a href=\"%s\">HTML</a> | <a href=\"%s\">Org source</a></p>"
-                              org-description html-url org-url)))
-                ;; Update feed with the combined description, using HTML URL as the primary URL
-                (s3-publish-update-feed profile html-url org-title combined-description)))
+Handles ATX and setext headings, YAML front matter, emphasis, inline
+code, fenced code blocks, ordered/unordered/nested/task lists, links,
+images, autolinks, blockquotes, tables, thematic breaks, footnotes and
+backslash escapes.
 
-            ;; Return the HTML URL as this is the primary content
-            (kill-new html-url)
-            (message "%s" html-url)
-            html-url))))))
+A document whose body contains exactly one level-1 heading and no front
+matter title has that heading promoted to #+TITLE and its remaining
+headings shifted up one level, so Markdown written in the usual
+single-H1 style exports with a document title rather than a numbered
+first section.
+
+Indented (four space) code blocks and raw inline HTML are passed through
+as ordinary text rather than converted."
+  (let* ((lines (split-string markdown "\n"))
+         ;; A document's final newline is not a blank content line.
+         (lines (if (and lines (equal (car (last lines)) ""))
+                    (butlast lines)
+                  lines))
+         (frontmatter (s3-publish--md-strip-frontmatter lines))
+         (body (s3-publish--md-normalize-setext (nth 0 frontmatter)))
+         (title (nth 1 frontmatter))
+         (description (nth 2 frontmatter))
+         (promote (and (null title) (= (s3-publish--md-count-h1 body) 1)))
+         (shift 0))
+    (when promote
+      (setq shift 1)
+      (catch 'found
+        (let ((in-fence nil) (token nil))
+          (dolist (line body)
+            (cond
+             (in-fence
+              (when (s3-publish--md-fence-close-p line token)
+                (setq in-fence nil token nil)))
+             ((s3-publish--md-fence line)
+              (setq token (car (s3-publish--md-fence line)) in-fence t))
+             ((eq (s3-publish--md-atx-level line) 1)
+              (string-match "^#[ \t]+\\(.*?\\)[ \t]*#*[ \t]*$" line)
+              (throw 'found (setq title (match-string 1 line)))))))))
+    (concat
+     (if title
+         (format "#+TITLE: %s\n" (s3-publish--md-inline-to-org title))
+       "")
+     (if description
+         (format "#+DESCRIPTION: %s\n" (s3-publish--md-inline-to-org description))
+       "")
+     ;; Markdown uses _ and ^ as ordinary characters; stop Org's exporter
+     ;; from reading snake_case and a^b as subscripts and superscripts.
+     "#+OPTIONS: ^:nil\n\n"
+     (mapconcat #'identity (s3-publish--md-convert-lines body shift) "\n")
+     "\n")))
+
+(defun s3-publish--markdown-to-org-string (markdown)
+  "Convert MARKDOWN to Org markup, honouring `s3-publish-markdown-to-org-command'."
+  (if (null s3-publish-markdown-to-org-command)
+      (s3-publish-markdown-to-org markdown)
+    (with-temp-buffer
+      (insert markdown)
+      (let ((exit-code (shell-command-on-region
+                        (point-min) (point-max)
+                        s3-publish-markdown-to-org-command
+                        nil t "*s3-publish-markdown-error*" t)))
+        (unless (and (integerp exit-code) (zerop exit-code))
+          (error "Markdown conversion command failed: %s"
+                 s3-publish-markdown-to-org-command))
+        (buffer-string)))))
+
+
+;;; Markdown publishing -------------------------------------------------------
+
+(defun s3-publish--markdown-buffer-p ()
+  "Return non-nil if the current buffer holds Markdown.
+Recognises `markdown-mode' and derivatives such as `gfm-mode', and falls
+back to the visited file's extension so a .md file works even in
+`fundamental-mode'."
+  (or (derived-mode-p 'markdown-mode)
+      (and buffer-file-name
+           (member (downcase (or (file-name-extension buffer-file-name) ""))
+                   '("md" "markdown" "mdown" "mkd" "mkdn")))))
+
+(defun s3-publish-markdown-buffer ()
+  "Export the current Markdown buffer to HTML and upload it to S3.
+Before exporting, save the buffer and back up the original .md file to S3.
+Both files share the same key (computed from the markdown file and profile
+salt) with only their extensions differing.
+A link to the .md file is appended to the bottom of the HTML file.
+Only the HTML file URL is displayed and copied to the kill ring.
+When updating the RSS feed, both files are grouped as a single entry.
+
+The Markdown is converted to Org (see `s3-publish-markdown-to-org-command')
+and rendered with Org's HTML exporter, so the result is styled identically
+to a published Org buffer."
+  (interactive)
+  (when (and (buffer-file-name) (buffer-modified-p))
+    (save-buffer))
+  (let ((md-file (buffer-file-name)))
+    (unless md-file
+      (error "Current markdown buffer is not visiting a file"))
+    (let* ((markdown (buffer-substring-no-properties (point-min) (point-max)))
+           (org-text (s3-publish--markdown-to-org-string markdown))
+           (title (or (and (string-match "^#\\+TITLE:[ \t]*\\(.*\\)$" org-text)
+                           (match-string 1 org-text))
+                      (file-name-nondirectory md-file)))
+           (description (or (and (string-match "^#\\+DESCRIPTION:[ \t]*\\(.*\\)$" org-text)
+                                 (match-string 1 org-text))
+                            (format "Published on %s"
+                                    (format-time-string "%Y-%m-%d %H:%M")))))
+      (s3-publish--publish-document
+       md-file
+       (lambda () (s3-publish--org-string-export-to-html org-text))
+       title description "Markdown source"))))
+
+
+;;; Removal of published documents --------------------------------------------
+
+(defun s3-publish--delete-key (profile key &optional noerror)
+  "Delete KEY from PROFILE's bucket, returning t on success.
+With NOERROR, return nil on failure instead of signalling an error."
+  (let* ((s3cmd-config (s3-publish-generate-s3cmd-config profile))
+         (bucket (plist-get profile :bucket))
+         (s3-uri (format "s3://%s/%s" bucket key))
+         (output-buffer (generate-new-buffer "*s3-publish-remove-output*"))
+         exit-code)
+    (unwind-protect
+        (progn
+          (setq exit-code (call-process "s3cmd" nil output-buffer nil
+                                        "--config" s3cmd-config "del" s3-uri))
+          (cond
+           ((zerop exit-code) t)
+           (noerror nil)
+           (t (with-current-buffer output-buffer
+                (error "Error removing file from S3: %s" (buffer-string))))))
+      (kill-buffer output-buffer))))
+
+(defun s3-publish--remove-document-internal (file profile)
+  "Remove FILE and its published .html companion from S3 using PROFILE.
+Both objects share a key derived from FILE, differing only in extension.
+The RSS feed and HTML index entries are dropped using the HTML URL, since
+that is the URL those listings link to.  Returns the source S3 URI."
+  (let* ((salt (plist-get profile :salt))
+         (source-key (s3-publish-get-file-key file salt))
+         (html-key (concat (file-name-sans-extension source-key) ".html"))
+         (bucket (plist-get profile :bucket)))
+    (s3-publish--delete-key profile source-key)
+    (unless (string= source-key html-key)
+      (unless (s3-publish--delete-key profile html-key t)
+        (message "No published HTML companion found at %s" html-key)))
+    (when (and (plist-get profile :rss-feed)
+               (plist-get profile :public-acl))
+      (s3-publish-remove-from-feed profile (s3-publish--object-url profile html-key)))
+    (message "Successfully removed %s and %s from S3" source-key html-key)
+    (format "s3://%s/%s" bucket source-key)))
+
+(defun s3-publish-remove-document (file)
+  "Interactively remove FILE and its published HTML companion from S3.
+Use this for sources published with `s3-publish-org-buffer' or
+`s3-publish-markdown-buffer', which upload two objects per document.
+Returns the S3 URI of the removed source file."
+  (interactive "fFile to remove from S3: ")
+  (s3-publish--remove-document-internal file (s3-publish--select-profile)))
+
 
 (defun s3-publish-buffer ()
   "Publish the entire current buffer to S3.
@@ -1357,11 +1855,16 @@ The dispatch priorities are:
 1. If a region is active, run `s3-publish-region' on the selected region.
 2. If the current buffer is in org-mode:
    - Without a universal argument, run `s3-publish-org-buffer'.
-   - With a universal argument, run `s3-publish-remove-file' using the file backing the buffer.
-3. If the current buffer is in dired-mode:
+   - With a universal argument, run `s3-publish-remove-document' using the file
+     backing the buffer, which removes both the .org source and its HTML.
+3. If the current buffer holds Markdown (see `s3-publish--markdown-buffer-p'):
+   - Without a universal argument, run `s3-publish-markdown-buffer'.
+   - With a universal argument, run `s3-publish-remove-document' using the file
+     backing the buffer, which removes both the .md source and its HTML.
+4. If the current buffer is in dired-mode:
    - Without a universal argument, run `s3-publish-dired-upload-files'.
    - With a universal argument, run `s3-publish-dired-remove-files'.
-4. Otherwise:
+5. Otherwise:
    - Without a universal argument, run `s3-publish-buffer'.
    - With a universal argument, run `s3-publish-remove-file' using the file backing the buffer.
 ARG is the raw prefix argument."
@@ -1374,24 +1877,28 @@ ARG is the raw prefix argument."
    ((derived-mode-p 'org-mode)
     (if arg
         (if buffer-file-name
-            (s3-publish-remove-file buffer-file-name)
+            (s3-publish-remove-document buffer-file-name)
           (error "Current org buffer is not visiting a file"))
       (s3-publish-org-buffer)))
-   ;; Priority 3: Dired buffer.
+   ;; Priority 3: Markdown buffer.
+   ((s3-publish--markdown-buffer-p)
+    (if arg
+        (if buffer-file-name
+            (s3-publish-remove-document buffer-file-name)
+          (error "Current markdown buffer is not visiting a file"))
+      (s3-publish-markdown-buffer)))
+   ;; Priority 4: Dired buffer.
    ((derived-mode-p 'dired-mode)
     (if arg
         (s3-publish-dired-remove-files)
       (s3-publish-dired-upload-files)))
-   ;; Priority 4: Any other buffer.
+   ;; Priority 5: Any other buffer.
    (t
     (if arg
         (if buffer-file-name
             (s3-publish-remove-file buffer-file-name)
           (error "Current buffer is not visiting a file"))
       (s3-publish-buffer)))))
-
-
-
 ;; Modify the add-item-to-feed function to use the helper function
 (defun s3-publish-add-item-to-feed (feed file-url title description pubdate)
   "Add a new item to an existing RSS FEED XML string, or update if URL exists.

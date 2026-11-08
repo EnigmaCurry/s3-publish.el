@@ -26,6 +26,11 @@ share it with.
 There is also an option to create an HTML index and RSS feed if you
 wish to make these URLs discoverable.
 
+Org and Markdown buffers get special treatment: they are exported to
+styled, self-contained HTML pages (via Org's HTML exporter, so both
+look the same), published alongside their original source, and listed
+as a single entry in the feed.
+
 ** Dependencies
 
 This package requires the following external tools:
@@ -196,8 +201,64 @@ step:
  * =M-x s3-publish-org-buffer=
  * From the list, select the S3 profile destination.
  * The buffer will be exported to HTML and immediately uploaded to S3.
+ * The original =.org= source is uploaded alongside it, under the same
+   key but with the =.org= extension, and linked at the bottom of the
+   HTML page.
  * The URL will be printed in the minibuffer and copied to
    =kill-ring=.
+
+*** Publish Markdown Buffer
+
+Markdown buffers work exactly the same way, and produce exactly the
+same look:
+
+ * =M-x s3-publish-markdown-buffer=
+ * From the list, select the S3 profile destination.
+ * The buffer will be exported to HTML and immediately uploaded to S3.
+ * The original =.md= source is uploaded alongside it, under the same
+   key but with the =.md= extension, and linked at the bottom of the
+   HTML page.
+ * The URL will be printed in the minibuffer and copied to
+   =kill-ring=.
+
+Markdown is not rendered by a separate Markdown-to-HTML converter.  It
+is first translated to Org markup, then handed to Org's own HTML
+exporter. Published Markdown is therefore styled identically to
+published Org -- same stylesheet, table of contents, section
+numbering, source block containers and postamble -- and it picks up any
+customisation you make to your Org HTML export settings.
+
+The built-in translator needs no external programs and understands:
+
+ * ATX (=#=) and setext (====-=) headings
+ * YAML front matter (=title:= and =description:= become =#+TITLE:= and
+   =#+DESCRIPTION:=)
+ * =**bold**=, =*italic*=, =***both***=, =~~strikethrough~~= and
+   =`inline code`=
+ * Fenced code blocks, with or without a language, using backticks or
+   tildes
+ * Ordered, unordered, nested and task (=- [x]=) lists
+ * Links, images, autolinks and footnotes
+ * Tables, blockquotes and thematic breaks
+ * Backslash escapes
+
+A document containing exactly one level-1 heading and no front matter
+title has that heading promoted to =#+TITLE:=, with the remaining
+headings shifted up one level. This is the shape most Markdown takes
+(including most LLM output), and it means the published page gets a
+proper document title instead of a numbered first section.
+
+Indented (four space) code blocks and raw inline HTML are passed
+through as ordinary text rather than converted. If you want full
+CommonMark fidelity instead, point =s3-publish-markdown-to-org-command=
+at an external converter that writes Org markup, for example:
+
+#+begin_src emacs-lisp
+  (setq s3-publish-markdown-to-org-command "pandoc -f gfm -t org")
+#+end_src
+
+The result is still rendered by Org's HTML exporter, so the look is
+unchanged.
 
 *** Publish from dired mode
 
@@ -226,8 +287,20 @@ Mean). Its behavior is determined by the following priorities:
   - Without a prefix argument, it exports your Org buffer to HTML and
     uploads it using =s3-publish-org-buffer=.
   - With a universal (prefix) argument (e.g., =C-u M-x s3-publish=),
-    it removes the file associated with the Org buffer from S3 by
-    calling =s3-publish-remove-file=.
+    it removes both the =.org= source and its published HTML from S3
+    by calling =s3-publish-remove-document=.
+
+- *In a Markdown buffer:*
+  - Without a prefix argument, it exports your Markdown buffer to HTML
+    and uploads it using =s3-publish-markdown-buffer=.
+  - With a universal (prefix) argument, it removes both the =.md=
+    source and its published HTML from S3 by calling
+    =s3-publish-remove-document=.
+
+  Markdown buffers are detected by =markdown-mode= (and derivatives
+  such as =gfm-mode=), falling back to the file extension (=.md=,
+  =.markdown=, =.mdown=, =.mkd=, =.mkdn=) so a Markdown file is
+  recognised even without =markdown-mode= installed.
 
 - *In dired buffer:*
   - Without a prefix argument, it uploads the marked files using
@@ -280,6 +353,18 @@ You may also remove files from dired mode:
 This will delete the remote objects for the given files (if they
 exist). It will not remove them locally. If the HTML index and RSS
 feed is enabled, the URL will be removed from the feed as well.
+
+Documents published with =s3-publish-org-buffer= or
+=s3-publish-markdown-buffer= upload /two/ objects: the rendered HTML and
+the original source, sharing one key and differing only in extension.
+To remove both at once, along with their shared entry in the RSS feed
+and HTML index, use:
+
+ * =M-x s3-publish-remove-document=
+
+This is what =C-u M-x s3-publish= calls in an Org or Markdown buffer.
+Removing such a document with =s3-publish-remove-file= instead deletes
+only the source and leaves the HTML, and its feed entry, behind.
 
 ** Lifecycle
 
