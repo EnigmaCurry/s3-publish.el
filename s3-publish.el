@@ -637,8 +637,7 @@ body {
     margin:0 auto;
 }
 
-/* Toned down from simple_dark: 1.5em is loud where inline code is dense,
-   which Markdown tends to be. */
+/* 1.5em is loud where inline code is dense, which Markdown tends to be. */
 code {
 	color: #ffd269;
 	font-weight: bold;
@@ -914,9 +913,8 @@ span.org-parameter {
     font-size: 1.1em;
 }
 
-/* --- Fixed from the source theme ------------------------------------------ */
-/* The original rule nested `h1.title' inside `div#content' and left the
-   @media block unterminated, which swallowed everything after it. */
+/* Fixed: this rule used to nest `h1.title' inside `div#content' and leave the
+   @media block unterminated, which swallowed every rule after it. */
 @media screen and (max-width:768px) {
 	div#content {
 		padding: 0 0.5em 0.5em 0.5em;
@@ -926,7 +924,9 @@ span.org-parameter {
 	}
 }
 
-/* --- Added for s3-publish ------------------------------------------------- */
+/* --- Additions ---------------------------------------------------------- */
+/* Shared verbatim with the copy embedded in s3-publish.el as
+   `s3-publish-html-default-style'.  Keep the two in step. */
 
 /* Dark-only theme: match form controls and scrollbars to it. */
 :root { color-scheme: dark; }
@@ -959,7 +959,7 @@ pre.example {
 	background: #282928;
 }
 
-/* Markdown images are not size-constrained at the source, so cap them. */
+/* Images out of Markdown carry no size constraint, so cap them. */
 #content img {
 	max-width: 100%;
 	height: auto;
@@ -983,9 +983,9 @@ pre.example {
 	border-color: #ff5370;
 }
 
-/* Source block syntax colours.  s3-publish sets
-   `org-html-htmlize-output-type' to `css', so htmlize emits these classes
-   instead of baking the running Emacs theme's colours into every block. */
+/* Source block syntax colours, for exports where htmlize emits classes
+   rather than inline colours, i.e. `org-html-htmlize-output-type' set to
+   `css' -- which is what s3-publish publishes with. */
 pre .org-keyword, pre .org-preprocessor { color: #ff7b72; }
 pre .org-string, pre .org-doc { color: #a5d6ff; }
 pre .org-comment, pre .org-comment-delimiter { color: #8b949e; font-style: italic; }
@@ -995,8 +995,9 @@ pre .org-type, pre .org-constant { color: #79c0ff; }
 pre .org-builtin { color: #d2a8ff; }
 pre .org-warning { color: #ffa198; }
 
-/* s3-publish rewrites the TOC's generic \"Table of Contents\" heading to the
-   document's own title, so the contents read as nested beneath it. */
+/* A contents list headed by the document's own title instead of the generic
+   \"Table of Contents\", which is what s3-publish rewrites it to.  Inert on a
+   page that does not carry the class. */
 #table-of-contents h2.toc-title {
 	font-size: 110%;
 	margin: 0 0 .5em 0;
@@ -1074,14 +1075,33 @@ pre .org-warning { color: #ffa198; }
 		padding-top: .3em;
 	}
 }
+
+/* When publishing, s3-publish moves the postamble inside #content so that on
+   a wide screen it stays in the content column instead of spanning underneath
+   the contents sidebar.  These rules only bite where it has been moved; a
+   postamble left as a sibling of #content is untouched. */
+div#content > #postamble {
+	margin-top: 2em;
+	padding-top: 1em;
+	border-top: 1px solid #555;
+}
+/* ...unless the source link sits directly above it, having already drawn the
+   separating rule. */
+#org-download + #postamble {
+	margin-top: .5em;
+	padding-top: 0;
+	border-top: none;
+}
 "
   "A self-contained stylesheet for HTML published by s3-publish.
-Adapted from the author's simple_dark Emacs HTML theme, with rules added
-for the markup that theme does not cover: source block syntax classes,
-self-linking headings, the table of contents sidebar, example blocks,
-images, and the source-file link s3-publish appends.
-Inline code is set smaller than in the source theme.  Dark only.  See
-`s3-publish-html-theme'.")
+Adapted from the author's simple_dark Emacs HTML theme, with rules
+added for the markup that theme does not cover: source block syntax
+classes, self-linking headings, the table of contents sidebar, example
+blocks, images, the relocated postamble, and the source-file link
+s3-publish appends.  Inline code is set smaller than in the source
+theme.  Dark only.  See `s3-publish-html-theme'.")
+
+
 
 
 (defcustom s3-publish-html-theme 'default
@@ -1129,6 +1149,71 @@ Returns nil when no theme is configured."
         (buffer-string)))
      (t theme))))
 
+(defconst s3-publish-html-default-favicon
+  (concat "data:image/png;base64,"
+          "iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAIn0lEQVRYw52Xe5BU1RHGf33unTuPnZ19QXYFRJ4GqwyKVGmioBKQoIKPJIVRE2JCUPERyxCLEpNSy1dIRCuVKJZlKqlUlJRJykgAFRCNERQVKZGYIgFBBFweO8vuzs7MfZ3OHzM7u6skouefuTPTp7+v++s+p69wnOvO2S8Nae8MLjVqZygyWYVhotQBqNArlgNWdYs4Zr02ec8+vmrakePxK59mcOOUV06OtXi7qs71nExGUaxGWFXURoRBTBgoGhuMJFAEq+Uiok+nM84DT7x58b8/N4GFZ7/woOukFiXcNH5YwGqI1Qgw+MWYUimisSXJ2C81MmJ8jlxTEmvhaLtlz7YyO99rx7jBst+9M/vHn4nAtTPWjZRStKE+1Tq25HcS2aBiLBDHSleHzxdG1DF7/jimXnoimaxb22sBoxXPbzx3mBX37eVo78FdrUO8ry5df8HeTyWw8Kz1E9WNtmQSzW5vkEdRBBAsYWgo5MtMv/Ik5t99OsaARar/V1DzB8skXKG+JQEYtr92hF/ftAPr9USuJiYv3zxj2/8kcPN5a0aEkdmdchvcUtSpqIpagxGIYkt3PuCan05k1rzRKIKJLTiGrk6fZx/7D++8coiujjJhKWb2gvF844cTMFiW3fC27ni9JE6mGCXq7ehfPX/Rvj5M0/egqiaI5OVMotntDbsUFQGDGLAKXR0B3158KhfOG4MglY2OYdPq/dx6wXpW/WYnHe09YKBUitm6oR2JATWMn9QgPcUuTbtNbtAjLysqnyBwwzlrf55Lto3tDfIYVHSAqN2dPufMHs6cH4xDB2TshT+8z8M3v4GNlea2FOm6JKJKFFqmXzkKcRQEjCNALEU/Ty7ZNvaGs9f+YhCBxTPWjXSc1KJilAcbD9ImDC3ZBo9r7jqtmqrKx5aX2nnirm00NCZJ1zmIhdC3dLSHzFkwjulXjKoR/eBf3TiOgFGKQSeOk1z0o5l/P7FG4GgxusNzMkRRAMbUolSgVAg57+sjaWj0QCudUCpEPL5kK5msSyIjgKG3EFLsDpl3+6l87ycTayXW2x2ybeMhkmkXECLr4zlpir5/B4CZdfWaHOJc5UcFtAraF72NYlzPMOWSEdhaWpS/PLKDzsM+6ToXq4LfG9HcmubOp6Zy2fXjBohk+eND79Gd90kka2rjR0Ww9uqll7xa747Zm5rjGCcb2jJS6eKaYRRCS1uaE8fnKr8qBL5l45p91OWSAMSBxSSEu1dMpX5IchD4plUfse6pvTQ2u4MCizUgIensrqOFOcbGwcUKxDoYHMDGSn2TV9GvmoEdW/N0H/ZJ9GFJxa477w8sETY/386ji9+mLmcQ16mC22rHWRTFsXKxq8gkq2GFnmr1yKF28oWhxUo/tcMfFrGxIlJx6SYMQRSz9NrXmXvLKQwZlualP+9l0+p9pFIuXspU3A5uusp9YjnDFdERVuPK8VnlabBYMTgJw5H9JQp5n1xzJeTGoUkCPyYox8ShxaqSrnMp9UY8tmQrKuAI1OU8HLcWU39qLOCA1RgxdrhR1axqzOBlMHElumJXwLoVe2r/nDGtjTNnDUNVOeXMIUye1oYxCgr1TR71DQmyjR7GqYJja+C2LwlalcFSL9ed/ZzyidVfMnFkCcqWhT+bxJcvHF4Lo7sjItfiAcrBvUXu/e5GentCvKQz2NXA6D/mG8CISEFEQAbaSa0GHNdQ6Ar4/f3bad9TqGUo1+JVNwitI+s4YXSW0LcDtw8AHPi1giVqQOhxVWWf4zoT4shHMP2NWL16jx4qM33uKK57YFKlGwYEsOvdTv7xzIfsfLeTw/uLZOoTn8RUqSbfDMqIcRxiy35XMFuNuhMiQgTFVC9WLBw97DN7/ljmLZnY71CgJx/wxF3v8Oa6A6gFLy2kMh7GVHTvh+t7MoNJAEY8lNLbrvFYLSpXGmtQjaB6v3d3Rpw58wTmLTl1UDJ3vNXBspveoLuj0hmO25/vPvCBxXysZ5FKJYoTrzEn5dIrg6hUcIxXYxoGlky9YcE9p2MxxNWUvr+tk3uv2Ui5N6KpNYXTPwihVonCjx9lg2uhTxlHPCJbKpzUlFtpFq+c0iNinkw62aqBodgb8ZWLhtPQkkSo9HUcWX5561ugkG1IYLVyMzlSkbnUGxFbxVrFOdagJ1ItHSXpZnHEPLl45ZQeA9CQkvuDuIhjPGKrGGDS1NZazVhg7ZO7+WhPgWyDS6xgqu7CSMkfKHHJgvHc96epJDynvxuO0Qyu8QjiItmU3F8TZun6C/bGcXlZ1msGWzmAGtuSg/Zvfy1P0nNABSOVmSbyLYfbfWZ9ZwzfvHkCw0ZnaRuVJfDjKm1bw1Yq82PGayGOy8v6BtSaZMs3zryt29+/K5dsIYpUC50hfYVcMYrx/RirQuRbejoCCl0B37p1AvPvPq2mbyEfYIwMqH6qg61ozmump3xo56MbZ952rNJUr96cX7SdUTrRIK+vPtBXEljg8oVfpOWENIVOH1Vh4jlDuefpc7nilgk1qdY+tZv9u7tJpR0G9oPBaDrRIKUwHyVyDdNE+ie+T47lX10/MSrGW6Rc517/8Dgmnd9ay0S5FLF/Vw/NrWmaWlOD9v3ttztZsfSf1DV4OAkZoLtQ5zVTDDsiSSYmL9/wf8byvrV4xrqRh/LBhow7dOzltwxj+lXDAYvF1FLWd6xs23SYZx7dwfbNR2hs9nATletXxZKQFOlEEz3BwV2Naff4XkwGru9PWvVgUPYWjRwzhFETkwwdmcBLGcrFiPYPenl/WycH9vTiukK6PoExptrnCZJuljAuEcXlZcs3fe2zvZoNXDdOWX1ydyG+3UYy19VURm2MlRgkxk0YEikHxzEYcTC4OCKUtVgUlaczknngoVfP/fwvp4OITN/cEpWPXqaxnWFEJqvRNiBTHTCKYqUdeEtFXnRTjX995MWzOo7H738BS4n5qANJ2+cAAAAASUVORK5CYII=")
+  "A 32x32 icon inlined into published pages as a `data:' URI.
+Kept small on purpose: it rides along in every page s3-publish publishes.
+See `s3-publish-html-favicon'.")
+
+(defconst s3-publish--favicon-media-types
+  '(("png" . "image/png")
+    ("ico" . "image/x-icon")
+    ("svg" . "image/svg+xml")
+    ("gif" . "image/gif")
+    ("jpg" . "image/jpeg")
+    ("jpeg" . "image/jpeg")
+    ("webp" . "image/webp"))
+  "Media types for the image extensions `s3-publish-html-favicon' accepts.")
+
+(defcustom s3-publish-html-favicon 'default
+  "Icon linked from HTML published from Org and Markdown buffers.
+
+`default'  Embed `s3-publish-html-default-favicon'.
+A file     Embed that image file, base64 encoded, with its media type
+           taken from the extension.
+A string   Use it verbatim as the icon link's `href', which lets you point
+           at a `data:' URI you built yourself, or at an ordinary URL if
+           you would rather link than inline.  Any string that does not
+           name a readable file is treated this way.
+nil        Add no icon.
+
+A file is inlined rather than linked, for the same reason the stylesheet
+is: a published page then stays self-contained, with no icon to upload
+beside it and nothing to break when the page is served from another
+origin.  The cost is that the icon rides along in every page, so prefer a
+small one."
+  :type '(choice (const :tag "Built-in icon" default)
+                 (file :tag "Image file")
+                 (string :tag "href verbatim")
+                 (const :tag "None" nil))
+  :group 's3-publish)
+
+(defun s3-publish--html-favicon-uri ()
+  "Return the `href' for the published page's icon, or nil for no icon."
+  (let ((favicon s3-publish-html-favicon))
+    (cond
+     ((null favicon) nil)
+     ((eq favicon 'default) s3-publish-html-default-favicon)
+     ((not (stringp favicon))
+      (error "Invalid `s3-publish-html-favicon': %S" favicon))
+     ;; A readable file is inlined; anything else is already an href.
+     ((file-readable-p (expand-file-name favicon))
+      (let* ((path (expand-file-name favicon))
+             (ext (downcase (or (file-name-extension path) "")))
+             (type (or (cdr (assoc ext s3-publish--favicon-media-types))
+                       (error "No known media type for favicon %s" favicon))))
+        (concat "data:" type ";base64,"
+                (base64-encode-string
+                 (with-temp-buffer
+                   (set-buffer-multibyte nil)
+                   (insert-file-contents-literally path)
+                   (buffer-string))
+                 ;; One line: a data URI cannot carry the newlines
+                 ;; `base64-encode-string' inserts by default.
+                 t))))
+     (t favicon))))
+
 (defcustom s3-publish-html-self-link-headlines t
   "When non-nil, every heading in published HTML links to its own anchor.
 
@@ -1146,41 +1231,51 @@ ordinary links."
 
 (defun s3-publish--call-with-html-export-settings (fn)
   "Call FN with no arguments, with Org's HTML exporter configured.
-Applies `s3-publish-html-self-link-headlines' and the stylesheet selected
-by `s3-publish-html-theme'.  Each is skipped when not configured, so
-setting both off leaves your own Org export settings untouched."
+
+Applies `s3-publish-html-favicon', `s3-publish-html-theme' and
+`s3-publish-html-self-link-headlines'.  Each is independent, and each
+binding below is a no-op when its feature is off, so turning all three
+off leaves your own Org export settings untouched."
   (let* ((css (s3-publish--html-css))
-         (thunk
-          (if (null css)
-              fn
-            (lambda ()
-              (let (;; Our stylesheet replaces Org's, rather than patching
-                    ;; over it.
-                    (org-html-head-include-default-style nil)
-                    ;; Prepended, so a document's own `#+HTML_HEAD:' still
-                    ;; overrides the theme and any head the user configured
-                    ;; stays in place.
-                    (org-html-head (concat "<style type=\"text/css\">\n" css
-                                           "</style>\n" org-html-head))
-                    ;; Org otherwise bakes the running Emacs theme's colours
-                    ;; into every source block, which fights the page theme.
-                    ;; Emit classes instead and let the stylesheet colour them.
-                    (org-html-htmlize-output-type 'css)
-                    ;; A themed page is a modern page; skip the XHTML 1.0
-                    ;; prologue.
-                    (org-html-doctype "html5"))
-                (funcall fn))))))
-    (if (null s3-publish-html-self-link-headlines)
-        (funcall thunk)
-      (let ((org-html-self-link-headlines t)
-            ;; Org's generated ids are content hashes that change on every
-            ;; export, so a shared anchor stops resolving as soon as the
-            ;; document is republished.  Prefer a `:CUSTOM_ID:' where the
-            ;; document provides one -- Markdown always does, see
-            ;; `s3-publish-markdown-to-org' -- which keeps anchors both
-            ;; stable across publishes and readable in a URL.
-            (org-html-prefer-user-labels t))
-        (funcall thunk)))))
+         (favicon (s3-publish--html-favicon-uri))
+         ;; Prepended to `org-html-head', so a document's own `#+HTML_HEAD:'
+         ;; still wins and any head the user configured stays in place.
+         (extra-head
+          (concat
+           (if favicon
+               (format "<link rel=\"icon\" href=\"%s\" />\n" favicon)
+             "")
+           (if css
+               (concat "<style type=\"text/css\">\n" css "</style>\n")
+             ""))))
+    (let ((org-html-head
+           (if (string= extra-head "")
+               org-html-head
+             (concat extra-head org-html-head)))
+          ;; Our stylesheet replaces Org's, rather than patching over it.
+          (org-html-head-include-default-style
+           (if css nil org-html-head-include-default-style))
+          ;; Org otherwise bakes the running Emacs theme's colours into every
+          ;; source block, which fights the page theme.  Emit classes instead
+          ;; and let the stylesheet colour them.
+          (org-html-htmlize-output-type
+           (if css 'css org-html-htmlize-output-type))
+          ;; A themed page is a modern page; skip the XHTML 1.0 prologue.
+          (org-html-doctype (if css "html5" org-html-doctype))
+          (org-html-self-link-headlines
+           (if s3-publish-html-self-link-headlines
+               t
+             org-html-self-link-headlines))
+          ;; Org's generated ids are content hashes that change on every
+          ;; export, so a shared anchor stops resolving as soon as the
+          ;; document is republished.  Prefer a `:CUSTOM_ID:' where the
+          ;; document provides one -- Markdown always does, see
+          ;; `s3-publish-markdown-to-org' -- which keeps anchors both stable
+          ;; across publishes and readable in a URL.
+          (org-html-prefer-user-labels
+           (if s3-publish-html-self-link-headlines t org-html-prefer-user-labels)))
+      (funcall fn))))
+
 
 
 ;;; Shared publishing core ----------------------------------------------------
@@ -1262,15 +1357,25 @@ Returns the HTML URL, which is also copied to the kill ring."
                       source-file profile source-key "text/plain; charset=utf-8"))
          (html-file (funcall export-fn)))
     (setq html-file (if (file-symlink-p html-file) (file-truename html-file) html-file))
-    ;; Append a link to the source file at the bottom of the HTML.
+    ;; Append a link to the source file at the bottom of the content.
     (with-temp-buffer
       (insert-file-contents html-file)
       (let ((footer (format "<div id=\"org-download\"><a href=\"%s\">View %s</a></div>\n"
-                            source-url source-label)))
-        (goto-char (point-max))
-        (if (search-backward "</body>" nil t)
-            (progn (goto-char (match-beginning 0)) (insert footer))
-          (progn (goto-char (point-max)) (insert "\n" footer))))
+                            source-url source-label))
+            (postamble (save-excursion
+                         (goto-char (point-min))
+                         (and (re-search-forward "<div id=\"postamble\"" nil t)
+                              (match-beginning 0))))
+            (content-end (s3-publish--content-end-position)))
+        ;; Inside #content, so the link sits with the text on a wide screen
+        ;; rather than under the table of contents sidebar.
+        (cond
+         (postamble (goto-char postamble) (insert footer))
+         (content-end (goto-char content-end) (insert footer))
+         ((progn (goto-char (point-max)) (search-backward "</body>" nil t))
+          (goto-char (match-beginning 0))
+          (insert footer))
+         (t (goto-char (point-max)) (insert "\n" footer))))
       (write-region (point-min) (point-max) html-file nil 'quiet))
     (let ((html-url (s3-publish--upload-no-feed html-file profile html-key "text/html")))
       (when (and (plist-get profile :rss-feed)
@@ -1282,6 +1387,55 @@ Returns the HTML URL, which is also copied to the kill ring."
       (kill-new html-url)
       (message "%s" html-url)
       html-url)))
+
+(defun s3-publish--content-end-position ()
+  "Return the position just before the `</div>' that closes the #content div.
+Nil when the buffer has no #content div.  Org closes it immediately before
+the postamble, or before </body> when the document has no postamble."
+  (save-excursion
+    (goto-char (point-min))
+    (when (re-search-forward "<div id=\"content\"" nil t)
+      (let ((limit (save-excursion
+                     (goto-char (point-min))
+                     (cond
+                      ((re-search-forward "<div id=\"postamble\"" nil t)
+                       (match-beginning 0))
+                      ((progn (goto-char (point-min))
+                              (re-search-forward "</body>" nil t))
+                       (match-beginning 0))
+                      (t (point-max))))))
+        (goto-char limit)
+        (when (search-backward "</div>" nil t)
+          (point))))))
+
+(defun s3-publish--move-postamble-into-content (html-file)
+  "Move the postamble inside the #content div of HTML-FILE.
+
+Org emits the postamble as a sibling of #content.  On a wide screen,
+where the table of contents becomes a column beside the content, a
+sibling spans the full width and so lands beneath the sidebar rather than
+beneath the text it belongs to.  Inside #content it is a grid item like
+everything else and stays in the content column.
+
+Does nothing when the document has no postamble or no #content div."
+  (with-temp-buffer
+    (insert-file-contents html-file)
+    (goto-char (point-min))
+    ;; The default postamble holds only <p> elements, so the first </div>
+    ;; after it is its own.
+    (when (re-search-forward
+           "<div id=\"postamble\"\\(?:.\\|\n\\)*?</div>[ \t]*\n?" nil t)
+      ;; `string-trim' runs its own regexp match, which would clobber the
+      ;; match data `replace-match' needs, so cut first and trim after.
+      (let ((postamble (match-string 0)))
+        (replace-match "" t t)
+        (setq postamble (string-trim postamble))
+        (let ((end (s3-publish--content-end-position)))
+          (when end
+            (goto-char end)
+            (insert postamble "\n")
+            (write-region (point-min) (point-max) html-file nil 'quiet))))))
+  html-file)
 
 (defun s3-publish--rewrite-toc-heading (html-file)
   "Retitle the table of contents in HTML-FILE with the document's own title.
@@ -1331,7 +1485,8 @@ so it is expanded here while that buffer is still active."
             (html-file (if (file-symlink-p html-file)
                            (file-truename html-file)
                          html-file)))
-       (s3-publish--rewrite-toc-heading html-file)))))
+       (s3-publish--rewrite-toc-heading html-file)
+       (s3-publish--move-postamble-into-content html-file)))))
 
 (defun s3-publish--org-string-export-to-html (org-text)
   "Export ORG-TEXT, a string of Org markup, to a temporary HTML file.

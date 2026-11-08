@@ -308,6 +308,28 @@ reason, source blocks are exported with CSS classes rather than with
 the colours of your running Emacs theme baked in, so code is coloured
 by the page theme instead of fighting it.
 
+Published pages also carry an icon, inlined as a =data:= URI for the same
+self-contained reason:
+
+#+begin_src emacs-lisp
+  ;; The built-in icon (the default).
+  (setq s3-publish-html-favicon 'default)
+
+  ;; Your own image, inlined. Media type comes from the extension.
+  (setq s3-publish-html-favicon "~/.emacs.d/theme/icon/emacs.ico")
+
+  ;; Or an href used verbatim, to link rather than inline.
+  (setq s3-publish-html-favicon "https://example.com/icon.png")
+
+  ;; Or no icon at all.
+  (setq s3-publish-html-favicon nil)
+#+end_src
+
+Since the icon rides along in every page, keep it small: the built-in
+one is a 32x32 PNG of about 3kB encoded. A multi-size =.ico= is usually
+far larger -- the 34kB five-size =emacs.ico= would roughly quadruple a
+typical published page.
+
 *** Headings, anchors and the table of contents
 :PROPERTIES:
 :CUSTOM_ID: html-anchors
@@ -346,6 +368,11 @@ scroll. If the list is longer than the window it scrolls on its own,
 while its title stays put. Below that width it falls back to sitting
 inline above the content, and a document published without a table of
 contents keeps the full width.
+
+Org emits its postamble as a sibling of the content div, which would put
+it -- and the source-file link -- below the sidebar rather than below the
+text. Both are moved inside the content area when publishing, so they
+stay in the content column at any width.
 
 *** Publish from dired mode
 

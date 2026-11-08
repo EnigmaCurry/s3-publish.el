@@ -408,4 +408,125 @@ Org's generated ids are content hashes that change between exports."
             ((eq (aref css i) ?}) (setq close (1+ close)))))
     (should (= open close))))
 
+
+;;; Favicon
+
+(ert-deftest s3-publish-test-favicon-is-inlined-by-default ()
+  "The built-in icon rides along in the page as a data URI, not as a link."
+  (let ((body (test-s3-publish--export-body "#+TITLE: T\n* One\n"))
+        (head (let* ((f (s3-publish--org-string-export-to-html "#+TITLE: T\n* One\n"))
+                     (h (with-temp-buffer (insert-file-contents f) (buffer-string))))
+                (delete-file f)
+                h)))
+    (ignore body)
+    (should (string-match-p
+             "<link rel=\"icon\" href=\"data:image/png;base64,[A-Za-z0-9+/=]+\" />" head))))
+
+(ert-deftest s3-publish-test-favicon-can-be-disabled ()
+  "A nil favicon adds no icon link at all."
+  (let* ((s3-publish-html-favicon nil)
+         (f (s3-publish--org-string-export-to-html "#+TITLE: T\n* One\n"))
+         (html (with-temp-buffer (insert-file-contents f) (buffer-string))))
+    (delete-file f)
+    (should-not (string-match-p "rel=\"icon\"" html))))
+
+(ert-deftest s3-publish-test-favicon-from-file ()
+  "A favicon naming a readable file is inlined with its media type."
+  (let ((png (make-temp-file "s3-publish-icon-" nil ".png" "not-really-a-png")))
+    (unwind-protect
+        (let* ((s3-publish-html-favicon png)
+               (f (s3-publish--org-string-export-to-html "#+TITLE: T\n* One\n"))
+               (html (with-temp-buffer (insert-file-contents f) (buffer-string))))
+          (delete-file f)
+          (should (string-match-p "href=\"data:image/png;base64," html))
+          ;; The data URI must be one line, or the href breaks.
+          (should (string-match-p "href=\"data:image/png;base64,[A-Za-z0-9+/=]+\"" html)))
+      (delete-file png))))
+
+(ert-deftest s3-publish-test-favicon-media-type-from-extension ()
+  "The media type follows the file's extension."
+  (dolist (case '(("ico" . "image/x-icon") ("svg" . "image/svg+xml")))
+    (let ((file (make-temp-file "s3-publish-icon-" nil (concat "." (car case)) "x")))
+      (unwind-protect
+          (let ((s3-publish-html-favicon file))
+            (should (string-prefix-p (concat "data:" (cdr case) ";base64,")
+                                     (s3-publish--html-favicon-uri))))
+        (delete-file file)))))
+
+(ert-deftest s3-publish-test-favicon-string-used-verbatim ()
+  "A string that is not a readable file is used as the href as given."
+  (let ((s3-publish-html-favicon "https://example.com/icon.png"))
+    (should (equal (s3-publish--html-favicon-uri) "https://example.com/icon.png"))))
+
+(ert-deftest s3-publish-test-favicon-is-independent-of-the-theme ()
+  "Turning the theme off must not take the icon with it, or the reverse."
+  (let* ((s3-publish-html-theme nil)
+         (f (s3-publish--org-string-export-to-html "#+TITLE: T\n* One\n"))
+         (html (with-temp-buffer (insert-file-contents f) (buffer-string))))
+    (delete-file f)
+    (should (string-match-p "rel=\"icon\"" html))
+    ;; Theme off, so Org's own stylesheet is back.
+    (should (string-match-p "#content { max-width: 60em" html))))
+
+(ert-deftest s3-publish-test-default-favicon-stays-small ()
+  "The icon is embedded in every published page, so it must stay small.
+The source emacs.ico is 34kB across five sizes; only the 32x32 is wanted."
+  (should (string-prefix-p "data:image/png;base64," s3-publish-html-default-favicon))
+  (should (< (length s3-publish-html-default-favicon) 8192)))
+
+
+;;; Footer placement
+
+(ert-deftest s3-publish-test-postamble-moves-inside-content ()
+  "The postamble must sit inside #content, not beside it.
+As a sibling it spans the full width, so on a wide screen it lands under
+the contents sidebar rather than under the text it belongs to."
+  (let* ((body (test-s3-publish--export-body "#+TITLE: T\n* One\n"))
+         (content-start (string-match "<div id=\"content\"" body))
+         (postamble (string-match "<div id=\"postamble\"" body))
+         ;; The div that closes #content is the last one before </body>.
+         (body-end (string-match "</body>" body))
+         (content-close (string-match "</div>[ \t\n]*</body>" body)))
+    (should content-start)
+    (should postamble)
+    (should content-close)
+    (should (< content-start postamble))
+    (should (< postamble content-close))
+    (should (< content-close body-end))))
+
+(ert-deftest s3-publish-test-content-end-position ()
+  "The end of #content is found with and without a postamble."
+  (dolist (case (list
+                 (cons "<body>\n<div id=\"content\">\nx\n</div>\n<div id=\"postamble\">p</div>\n</body>"
+                       "<div id=\"postamble\">")
+                 (cons "<body>\n<div id=\"content\">\nx\n</div>\n</body>" "</body>")))
+    (with-temp-buffer
+      (insert (car case))
+      (let ((pos (s3-publish--content-end-position)))
+        (should pos)
+        ;; Point lands on the </div> that closes #content, which is the one
+        ;; directly before the marker.
+        (should (string-prefix-p "</div>" (buffer-substring pos (point-max))))))))
+
+(ert-deftest s3-publish-test-postamble-move-is-a-noop-without-one ()
+  "A document with no postamble is left alone rather than mangled."
+  (let ((file (make-temp-file "s3-publish-nopost-" nil ".html"
+                              "<body>\n<div id=\"content\">\nx\n</div>\n</body>")))
+    (unwind-protect
+        (let ((before (with-temp-buffer (insert-file-contents file) (buffer-string))))
+          (s3-publish--move-postamble-into-content file)
+          (should (equal before
+                         (with-temp-buffer (insert-file-contents file) (buffer-string)))))
+      (delete-file file))))
+
+(ert-deftest s3-publish-test-postamble-move-preserves-its-content ()
+  "Moving the postamble must not drop or duplicate it."
+  (let ((body (test-s3-publish--export-body "#+TITLE: T\n* One\n")))
+    (should (= 1 (cl-count-if (lambda (_) t)
+                              (let ((n 0) (i 0))
+                                (while (setq i (string-match "<div id=\"postamble\"" body i))
+                                  (setq n (1+ n) i (1+ i)))
+                                (make-list n t)))))
+    (should (string-match-p "Author:" body))))
+
 (provide 'test-s3-publish)
