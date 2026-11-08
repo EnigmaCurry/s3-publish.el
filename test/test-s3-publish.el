@@ -218,10 +218,53 @@
       (should (string-match-p "<div id=\"content\" class=\"content\">" html))
       (should (string-match-p "class=\"outline-2\"" html))
       (should (string-match-p "<b>bold</b>" html))
-      ;; Org's default stylesheet is embedded, so the page is self-contained.
+      ;; The theme is embedded, so the page is self-contained.
       (should (string-match-p "<style type=\"text/css\">" html))
-      (should (string-match-p "#content { max-width: 60em" html))
+      (should (string-match-p "prefers-color-scheme" html))
+      ;; Org's minimal default stylesheet is replaced, not layered under ours.
+      (should-not (string-match-p "#content { max-width: 60em" html))
       (delete-file html-file)))
+
+(ert-deftest s3-publish-test-theme-off-restores-org-default ()
+  "A nil theme leaves Org's own export settings, and stylesheet, in place."
+  (let* ((s3-publish-html-theme nil)
+         (html-file (s3-publish--org-string-export-to-html "* Section\n"))
+         (html (with-temp-buffer (insert-file-contents html-file) (buffer-string))))
+    (should (string-match-p "#content { max-width: 60em" html))
+    (should-not (string-match-p "prefers-color-scheme" html))
+    (delete-file html-file)))
+
+(ert-deftest s3-publish-test-theme-from-css-file ()
+  "A theme naming a readable file is inlined from that file."
+  (let ((css-file (make-temp-file "s3-publish-theme-" nil ".css"
+                                  "body { color: fuchsia; }\n")))
+    (unwind-protect
+        (let* ((s3-publish-html-theme css-file)
+               (html-file (s3-publish--org-string-export-to-html "* Section\n"))
+               (html (with-temp-buffer
+                       (insert-file-contents html-file)
+                       (buffer-string))))
+          (should (string-match-p "body { color: fuchsia; }" html))
+          (delete-file html-file))
+      (delete-file css-file))))
+
+(ert-deftest s3-publish-test-theme-from-css-string ()
+  "A theme that is not a file name is inlined verbatim as CSS."
+  (let* ((s3-publish-html-theme "body { color: teal; }\n/* two lines */\n")
+         (html-file (s3-publish--org-string-export-to-html "* Section\n"))
+         (html (with-temp-buffer (insert-file-contents html-file) (buffer-string))))
+    (should (string-match-p "body { color: teal; }" html))
+    (delete-file html-file)))
+
+(ert-deftest s3-publish-test-document-head-overrides-theme ()
+  "A document's own HTML_HEAD still wins over the configured theme."
+  (let* ((s3-publish-html-theme 'default)
+         (html-file (s3-publish--org-string-export-to-html
+                     "#+HTML_HEAD: <style>body { color: olive; }</style>\n* Section\n"))
+         (html (with-temp-buffer (insert-file-contents html-file) (buffer-string))))
+    (should (string-match-p "body { color: olive; }" html))
+    (should-not (string-match-p "prefers-color-scheme" html))
+    (delete-file html-file)))
 
 (ert-deftest s3-publish-test-markdown-buffer-p ()
   "Markdown buffers are recognised by mode or by file extension."

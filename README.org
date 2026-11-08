@@ -29,7 +29,8 @@ wish to make these URLs discoverable.
 Org and Markdown buffers get special treatment: they are exported to
 styled, self-contained HTML pages (via Org's HTML exporter, so both
 look the same), published alongside their original source, and listed
-as a single entry in the feed.
+as a single entry in the feed. The styling is configurable -- see
+[[#html-theme][Theming the published HTML]].
 
 ** Dependencies
 
@@ -225,8 +226,8 @@ Markdown is not rendered by a separate Markdown-to-HTML converter.  It
 is first translated to Org markup, then handed to Org's own HTML
 exporter. Published Markdown is therefore styled identically to
 published Org -- same stylesheet, table of contents, section
-numbering, source block containers and postamble -- and it picks up any
-customisation you make to your Org HTML export settings.
+numbering, source block containers and postamble. See [[#html-theme][Theming the published
+HTML]].
 
 The built-in translator needs no external programs and understands:
 
@@ -259,6 +260,45 @@ at an external converter that writes Org markup, for example:
 
 The result is still rendered by Org's HTML exporter, so the look is
 unchanged.
+
+*** Theming the published HTML
+:PROPERTIES:
+:CUSTOM_ID: html-theme
+:END:
+
+Org's own export stylesheet is deliberately minimal, which makes
+published pages look unstyled. =s3-publish-html-theme= decides the CSS
+that gets inlined into every page it publishes:
+
+#+begin_src emacs-lisp
+  ;; The built-in theme (the default). Self-contained, with light and
+  ;; dark variants that follow the reader's system preference.
+  (setq s3-publish-html-theme 'default)
+
+  ;; Your own stylesheet, read from disk at publish time.
+  (setq s3-publish-html-theme "~/.emacs.d/theme/simple_dark.css")
+
+  ;; Or CSS inline.
+  (setq s3-publish-html-theme "body { max-width: 50em; margin: auto; }")
+
+  ;; Or nothing at all: leave your Org HTML export settings untouched.
+  (setq s3-publish-html-theme nil)
+#+end_src
+
+The theme belongs to the publisher rather than to the document, which
+is what lets Markdown be themed at all -- Markdown is exported from a
+temporary directory, so a document-relative =#+SETUPFILE:= pointing at a
+stylesheet cannot resolve there.
+
+A document that sets its own =#+HTML_HEAD:= still overrides the theme, so
+per-document styling keeps working.
+
+The CSS is always inlined, never linked, so a published page stays
+self-contained: there is no stylesheet to upload beside it and nothing
+to break when the page is viewed from a different origin. For the same
+reason, source blocks are exported with CSS classes rather than with
+the colours of your running Emacs theme baked in, so code is coloured
+by the page theme instead of fighting it.
 
 *** Publish from dired mode
 

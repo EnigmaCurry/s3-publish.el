@@ -612,6 +612,269 @@ If the upload fails, it signals an error with the error message."
               (error "Upload failed: %s" (buffer-string)))))
       (kill-buffer output-buffer))))
 
+;;; HTML theme ----------------------------------------------------------------
+;; Org's export stylesheet is deliberately minimal, so published documents
+;; look unstyled unless they carry a theme of their own.  Carrying it in the
+;; document does not work here anyway: a `#+SETUPFILE:' naming a stylesheet
+;; next to the source cannot resolve for Markdown, which is exported from a
+;; temporary directory.  The theme therefore belongs to the publisher, and is
+;; inlined into every page so published documents stay self-contained.
+
+(defconst s3-publish-html-default-style "\
+html { -webkit-text-size-adjust: 100%; }
+:root {
+  color-scheme: light dark;
+  --s3-bg: #ffffff;
+  --s3-fg: #24292f;
+  --s3-muted: #6b7280;
+  --s3-link: #0b63ce;
+  --s3-visited: #6d42c8;
+  --s3-border: #d9dee4;
+  --s3-surface: #f6f8fa;
+  --s3-accent: #0b63ce;
+  --s3-kw: #cf222e;
+  --s3-str: #0a3069;
+  --s3-com: #6b7280;
+  --s3-fn: #8250df;
+  --s3-var: #953800;
+  --s3-type: #0550ae;
+  --s3-builtin: #6f42c1;
+  --s3-warn: #bc4c00;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --s3-bg: #15181d;
+    --s3-fg: #d6dde6;
+    --s3-muted: #99a3ae;
+    --s3-link: #6cb6ff;
+    --s3-visited: #c4a7fd;
+    --s3-border: #2c333c;
+    --s3-surface: #1c2027;
+    --s3-accent: #6cb6ff;
+    --s3-kw: #ff7b72;
+    --s3-str: #a5d6ff;
+    --s3-com: #8b949e;
+    --s3-fn: #d2a8ff;
+    --s3-var: #ffa657;
+    --s3-type: #79c0ff;
+    --s3-builtin: #d2a8ff;
+    --s3-warn: #ffa657;
+  }
+}
+*, *::before, *::after { box-sizing: border-box; }
+body {
+  margin: 0;
+  padding: 2.5rem 1.25rem 3rem;
+  background: var(--s3-bg);
+  color: var(--s3-fg);
+  font-family: -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Ubuntu,
+               Cantarell, Helvetica Neue, Arial, sans-serif;
+  font-size: 17px;
+  line-height: 1.65;
+}
+#preamble, #content, #postamble, #org-download {
+  max-width: 46rem;
+  margin-left: auto;
+  margin-right: auto;
+}
+h1, h2, h3, h4, h5, h6 { line-height: 1.25; margin: 2.2em 0 .6em; font-weight: 600; }
+h1.title { margin: 0 0 1.5rem; font-size: 2.1rem; text-align: left; letter-spacing: -.01em; }
+p.subtitle { margin: -1.1rem 0 2rem; text-align: left; font-size: 1.05rem; font-weight: 400; color: var(--s3-muted); }
+h2 { font-size: 1.5rem; padding-bottom: .3em; border-bottom: 1px solid var(--s3-border); }
+h3 { font-size: 1.22rem; }
+h4 { font-size: 1.05rem; }
+h5, h6 { font-size: 1rem; color: var(--s3-muted); }
+p { margin: 1em 0; }
+a { color: var(--s3-link); text-decoration: none; }
+a:visited { color: var(--s3-visited); }
+a:hover { text-decoration: underline; }
+ul, ol { padding-left: 1.4rem; }
+li { margin: .25em 0; }
+li p { margin: .25em 0; }
+dt { margin-top: 1em; font-weight: 600; }
+dd { margin-left: 1.2rem; }
+hr { margin: 2.5rem 0; border: 0; border-top: 1px solid var(--s3-border); }
+img { max-width: 100%; height: auto; border-radius: 6px; }
+figure { margin: 1.5rem 0; }
+figcaption { font-size: .9em; color: var(--s3-muted); }
+blockquote {
+  margin: 1.5rem 0;
+  padding: .6rem 1.1rem;
+  border-left: 3px solid var(--s3-accent);
+  border-radius: 0 6px 6px 0;
+  background: var(--s3-surface);
+}
+blockquote p:first-child { margin-top: 0; }
+blockquote p:last-child { margin-bottom: 0; }
+code, kbd, samp, pre {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas,
+               Liberation Mono, monospace;
+}
+code {
+  padding: .1em .35em;
+  font-size: .9em;
+  background: var(--s3-surface);
+  border: 1px solid var(--s3-border);
+  border-radius: 4px;
+}
+pre {
+  margin: 1.5rem 0;
+  padding: 1rem 1.1rem;
+  overflow-x: auto;
+  font-size: .875em;
+  line-height: 1.5;
+  background: var(--s3-surface);
+  border: 1px solid var(--s3-border);
+  border-radius: 8px;
+}
+pre code { padding: 0; font-size: 1em; background: none; border: 0; }
+.org-src-container { margin: 1.5rem 0; }
+.org-src-container pre { margin: 0; }
+table {
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  margin: 1.5rem 0;
+  overflow-x: auto;
+  border-collapse: collapse;
+  font-size: .95em;
+}
+th, td { padding: .45em .75em; text-align: left; border: 1px solid var(--s3-border); }
+thead th { background: var(--s3-surface); font-weight: 600; }
+caption { caption-side: top; padding-bottom: .4em; text-align: left; font-size: .9em; color: var(--s3-muted); }
+#table-of-contents {
+  margin: 0 0 2.5rem;
+  padding: .9rem 1.2rem;
+  background: var(--s3-surface);
+  border: 1px solid var(--s3-border);
+  border-radius: 8px;
+}
+#table-of-contents h2 {
+  margin: 0 0 .4rem;
+  padding: 0;
+  border: 0;
+  font-size: .78rem;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--s3-muted);
+}
+#table-of-contents ul { margin: 0; padding-left: 1.1rem; }
+#table-of-contents li { margin: .1em 0; }
+.tag {
+  padding: .05em .4em;
+  font-size: 75%;
+  font-weight: 400;
+  color: var(--s3-muted);
+  background: var(--s3-surface);
+  border: 1px solid var(--s3-border);
+  border-radius: 4px;
+}
+.todo { color: var(--s3-kw); font-weight: 600; }
+.done { color: #1a7f37; font-weight: 600; }
+.priority { color: var(--s3-warn); }
+.timestamp { font-size: .9em; color: var(--s3-muted); }
+.timestamp-kwd { color: var(--s3-accent); }
+.underline { text-decoration: underline; }
+.org-right { text-align: right; }
+.org-left { text-align: left; }
+.org-center { margin-left: auto; margin-right: auto; text-align: center; }
+p.verse { margin-left: 1.5rem; font-style: italic; }
+.footpara { display: inline; margin: 0; }
+.footdef { margin: .4em 0; font-size: .92em; }
+#footnotes h2 { font-size: 1rem; }
+#preamble, #postamble { font-size: .85rem; color: var(--s3-muted); }
+#postamble { margin-top: 3rem; padding-top: 1.2rem; border-top: 1px solid var(--s3-border); }
+#postamble p { margin: .25em 0; }
+#org-download { margin-top: 2rem; font-size: .9rem; }
+#org-download a {
+  display: inline-block;
+  padding: .4em .9em;
+  background: var(--s3-surface);
+  border: 1px solid var(--s3-border);
+  border-radius: 6px;
+}
+#org-download a:hover { border-color: var(--s3-accent); text-decoration: none; }
+pre .org-keyword, pre .org-preprocessor { color: var(--s3-kw); }
+pre .org-string, pre .org-doc { color: var(--s3-str); }
+pre .org-comment, pre .org-comment-delimiter { color: var(--s3-com); font-style: italic; }
+pre .org-function-name { color: var(--s3-fn); }
+pre .org-variable-name { color: var(--s3-var); }
+pre .org-type, pre .org-constant { color: var(--s3-type); }
+pre .org-builtin { color: var(--s3-builtin); }
+pre .org-warning { color: var(--s3-warn); }
+"
+  "A self-contained stylesheet for HTML published by s3-publish.
+Styles Org's exported markup -- the title, table of contents, source
+blocks, tables and postamble -- plus the source link s3-publish appends.
+Adapts to the reader's light or dark preference.  See
+`s3-publish-html-theme'.")
+
+(defcustom s3-publish-html-theme 'default
+  "Stylesheet inlined into HTML published from Org and Markdown buffers.
+
+`default'  Embed `s3-publish-html-default-style', a self-contained theme
+           with light and dark variants.
+A file     Embed the contents of that CSS file, e.g.
+           \"~/.emacs.d/theme/simple_dark.css\".
+A string   Embed it verbatim as CSS.  Any multi-line string, or any string
+           that does not name a readable file, is treated this way.
+nil        Leave your Org HTML export settings alone.  A document is then
+           styled only if it carries a stylesheet itself, through
+           `#+HTML_HEAD:' or a `#+SETUPFILE:', and Org's minimal default
+           stylesheet applies when it does not.
+
+The CSS is inlined, so published pages stay self-contained and no
+stylesheet has to be uploaded beside them.  A document that sets its own
+`#+HTML_HEAD:' still wins, so per-document themes keep working.
+
+This is also the only way to theme Markdown: it is exported from a
+temporary directory, where a document-relative `#+SETUPFILE:' cannot
+resolve."
+  :type '(choice (const :tag "Built-in s3-publish theme" default)
+                 (file :tag "CSS file")
+                 (string :tag "CSS")
+                 (const :tag "None (use your Org settings)" nil))
+  :group 's3-publish)
+
+(defun s3-publish--html-css ()
+  "Return the CSS selected by `s3-publish-html-theme'.
+Returns nil when no theme is configured."
+  (let ((theme s3-publish-html-theme))
+    (cond
+     ((null theme) nil)
+     ((eq theme 'default) s3-publish-html-default-style)
+     ((not (stringp theme))
+      (error "Invalid `s3-publish-html-theme': %S" theme))
+     ;; A single-line string naming a readable file is a path; everything
+     ;; else is CSS.  Real CSS spans several lines, so the two never collide.
+     ((and (not (string-match-p "\n" theme))
+           (file-readable-p (expand-file-name theme)))
+      (with-temp-buffer
+        (insert-file-contents (expand-file-name theme))
+        (buffer-string)))
+     (t theme))))
+
+(defun s3-publish--call-with-html-theme (fn)
+  "Call FN with no arguments, with Org's HTML exporter themed.
+Binds the export variables that apply `s3-publish-html-theme', and calls
+FN unchanged when no theme is configured."
+  (let ((css (s3-publish--html-css)))
+    (if (null css)
+        (funcall fn)
+      (let (;; Our stylesheet replaces Org's, rather than patching over it.
+            (org-html-head-include-default-style nil)
+            ;; Prepended, so a document's own `#+HTML_HEAD:' still overrides
+            ;; the theme and any head the user configured stays in place.
+            (org-html-head (concat "<style type=\"text/css\">\n" css "</style>\n"
+                                   org-html-head))
+            ;; Org otherwise bakes the running Emacs theme's colours into
+            ;; every source block, which fights the page theme.  Emit
+            ;; classes instead and let the stylesheet colour them.
+            (org-html-htmlize-output-type 'css)
+            ;; A themed page is a modern page; skip the XHTML 1.0 prologue.
+            (org-html-doctype "html5"))
+        (funcall fn)))))
+
 ;;; Shared publishing core ----------------------------------------------------
 ;; Both the Org and Markdown publishers go through this, so the two stay
 ;; feature-for-feature identical.
@@ -714,11 +977,17 @@ Returns the HTML URL, which is also copied to the kill ring."
 
 (defun s3-publish--export-buffer-to-html ()
   "Export the current Org buffer to HTML and return an absolute file name.
+The export is themed according to `s3-publish-html-theme'.  Both the Org
+and the Markdown publisher export through here, so the two are styled
+identically.
+
 `org-html-export-to-html' returns a name relative to the Org buffer's
 `default-directory', which stops resolving once another buffer is current,
 so it is expanded here while that buffer is still active."
-  (let ((html-file (expand-file-name (org-html-export-to-html))))
-    (if (file-symlink-p html-file) (file-truename html-file) html-file)))
+  (s3-publish--call-with-html-theme
+   (lambda ()
+     (let ((html-file (expand-file-name (org-html-export-to-html))))
+       (if (file-symlink-p html-file) (file-truename html-file) html-file)))))
 
 (defun s3-publish--org-string-export-to-html (org-text)
   "Export ORG-TEXT, a string of Org markup, to a temporary HTML file.
