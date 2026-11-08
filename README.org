@@ -30,7 +30,8 @@ Org and Markdown buffers get special treatment: they are exported to
 styled, self-contained HTML pages (via Org's HTML exporter, so both
 look the same), published alongside their original source, and listed
 as a single entry in the feed. The styling is configurable -- see
-[[#html-theme][Theming the published HTML]].
+[[#html-theme][Theming the published HTML]] and [[#html-anchors][Headings, anchors and
+the table of contents]].
 
 ** Dependencies
 
@@ -271,8 +272,8 @@ published pages look unstyled. =s3-publish-html-theme= decides the CSS
 that gets inlined into every page it publishes:
 
 #+begin_src emacs-lisp
-  ;; The built-in theme (the default). Self-contained, with light and
-  ;; dark variants that follow the reader's system preference.
+  ;; The built-in theme (the default). A dark theme adapted from the
+  ;; author's simple_dark Emacs HTML theme, and self-contained.
   (setq s3-publish-html-theme 'default)
 
   ;; Your own stylesheet, read from disk at publish time.
@@ -284,6 +285,13 @@ that gets inlined into every page it publishes:
   ;; Or nothing at all: leave your Org HTML export settings untouched.
   (setq s3-publish-html-theme nil)
 #+end_src
+
+The built-in theme is =simple_dark= plus rules for the markup that theme
+does not cover: source block syntax classes, self-linking headings, the
+table of contents sidebar, example blocks, images, and the source-file
+link s3-publish appends to the bottom of every page. If you point
+=s3-publish-html-theme= at =simple_dark.css= on disk instead, you get the
+original without those additions.
 
 The theme belongs to the publisher rather than to the document, which
 is what lets Markdown be themed at all -- Markdown is exported from a
@@ -299,6 +307,45 @@ to break when the page is viewed from a different origin. For the same
 reason, source blocks are exported with CSS classes rather than with
 the colours of your running Emacs theme baked in, so code is coloured
 by the page theme instead of fighting it.
+
+*** Headings, anchors and the table of contents
+:PROPERTIES:
+:CUSTOM_ID: html-anchors
+:END:
+
+Org gives a heading an =id=, reachable only from the table of contents.
+Published pages make every heading a link to its own anchor, so
+clicking any heading puts that anchor in the address bar, ready to copy
+and share. Headings still read as headings; the link reveals itself on
+hover. Turn it off with:
+
+#+begin_src emacs-lisp
+  (setq s3-publish-html-self-link-headlines nil)
+#+end_src
+
+For Markdown, each heading also gets a =:CUSTOM_ID:= derived from its
+text, so anchors are readable and, more importantly, stable:
+
+: https://my-bucket.region.provider/c6ej4-....html#getting-started
+
+Org's generated ids are content hashes that change on every export, so
+a link shared against one would stop resolving the next time you
+published the document. Duplicate headings are uniquified (=#notes=,
+=#notes-2=). Org buffers get the same treatment wherever they set their
+own =:CUSTOM_ID:=.
+
+The table of contents is headed by the document's own title -- its first
+header -- rather than by the words "Table of Contents", with the entries
+nested beneath it. The title links back to the top of the page. A
+document without a title gets no heading there at all.
+
+On a screen wide enough for it (1100px), the table of contents moves
+out of the document flow into its own column on the right, narrower
+than the content and sticky, so it stays visible however far down you
+scroll. If the list is longer than the window it scrolls on its own,
+while its title stays put. Below that width it falls back to sitting
+inline above the content, and a document published without a table of
+contents keeps the full width.
 
 *** Publish from dired mode
 

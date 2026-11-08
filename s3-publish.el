@@ -621,199 +621,474 @@ If the upload fails, it signals an error with the error message."
 ;; inlined into every page so published documents stay self-contained.
 
 (defconst s3-publish-html-default-style "\
-html { -webkit-text-size-adjust: 100%; }
-:root {
-  color-scheme: light dark;
-  --s3-bg: #ffffff;
-  --s3-fg: #24292f;
-  --s3-muted: #6b7280;
-  --s3-link: #0b63ce;
-  --s3-visited: #6d42c8;
-  --s3-border: #d9dee4;
-  --s3-surface: #f6f8fa;
-  --s3-accent: #0b63ce;
-  --s3-kw: #cf222e;
-  --s3-str: #0a3069;
-  --s3-com: #6b7280;
-  --s3-fn: #8250df;
-  --s3-var: #953800;
-  --s3-type: #0550ae;
-  --s3-builtin: #6f42c1;
-  --s3-warn: #bc4c00;
+html, body {
+    margin: 0;
+    padding: 0;
+    min-height: 100vh;
 }
-@media (prefers-color-scheme: dark) {
-  :root {
-    --s3-bg: #15181d;
-    --s3-fg: #d6dde6;
-    --s3-muted: #99a3ae;
-    --s3-link: #6cb6ff;
-    --s3-visited: #c4a7fd;
-    --s3-border: #2c333c;
-    --s3-surface: #1c2027;
-    --s3-accent: #6cb6ff;
-    --s3-kw: #ff7b72;
-    --s3-str: #a5d6ff;
-    --s3-com: #8b949e;
-    --s3-fn: #d2a8ff;
-    --s3-var: #ffa657;
-    --s3-type: #79c0ff;
-    --s3-builtin: #d2a8ff;
-    --s3-warn: #ffa657;
-  }
-}
-*, *::before, *::after { box-sizing: border-box; }
 body {
-  margin: 0;
-  padding: 2.5rem 1.25rem 3rem;
-  background: var(--s3-bg);
-  color: var(--s3-fg);
-  font-family: -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Ubuntu,
-               Cantarell, Helvetica Neue, Arial, sans-serif;
-  font-size: 17px;
-  line-height: 1.65;
+	background: #121212;
+	color: #e0e0e0;
+	font-family: \"Bitstream Vera Sans\",Verdana,sans-serif;
+    display: flex;
+    flex-direction: column;
+    max-width: 90em;
+    justify-content: center;
+    margin:0 auto;
 }
-#preamble, #content, #postamble, #org-download {
-  max-width: 46rem;
-  margin-left: auto;
-  margin-right: auto;
-}
-h1, h2, h3, h4, h5, h6 { line-height: 1.25; margin: 2.2em 0 .6em; font-weight: 600; }
-h1.title { margin: 0 0 1.5rem; font-size: 2.1rem; text-align: left; letter-spacing: -.01em; }
-p.subtitle { margin: -1.1rem 0 2rem; text-align: left; font-size: 1.05rem; font-weight: 400; color: var(--s3-muted); }
-h2 { font-size: 1.5rem; padding-bottom: .3em; border-bottom: 1px solid var(--s3-border); }
-h3 { font-size: 1.22rem; }
-h4 { font-size: 1.05rem; }
-h5, h6 { font-size: 1rem; color: var(--s3-muted); }
-p { margin: 1em 0; }
-a { color: var(--s3-link); text-decoration: none; }
-a:visited { color: var(--s3-visited); }
-a:hover { text-decoration: underline; }
-ul, ol { padding-left: 1.4rem; }
-li { margin: .25em 0; }
-li p { margin: .25em 0; }
-dt { margin-top: 1em; font-weight: 600; }
-dd { margin-left: 1.2rem; }
-hr { margin: 2.5rem 0; border: 0; border-top: 1px solid var(--s3-border); }
-img { max-width: 100%; height: auto; border-radius: 6px; }
-figure { margin: 1.5rem 0; }
-figcaption { font-size: .9em; color: var(--s3-muted); }
-blockquote {
-  margin: 1.5rem 0;
-  padding: .6rem 1.1rem;
-  border-left: 3px solid var(--s3-accent);
-  border-radius: 0 6px 6px 0;
-  background: var(--s3-surface);
-}
-blockquote p:first-child { margin-top: 0; }
-blockquote p:last-child { margin-bottom: 0; }
-code, kbd, samp, pre {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas,
-               Liberation Mono, monospace;
-}
+
+/* Toned down from simple_dark: 1.5em is loud where inline code is dense,
+   which Markdown tends to be. */
 code {
-  padding: .1em .35em;
-  font-size: .9em;
-  background: var(--s3-surface);
-  border: 1px solid var(--s3-border);
-  border-radius: 4px;
+	color: #ffd269;
+	font-weight: bold;
+	font-size: 0.95em;
+	margin: 0 0.25em 0 0.25em;
 }
-pre {
-  margin: 1.5rem 0;
-  padding: 1rem 1.1rem;
-  overflow-x: auto;
-  font-size: .875em;
-  line-height: 1.5;
-  background: var(--s3-surface);
-  border: 1px solid var(--s3-border);
-  border-radius: 8px;
+
+div#content {
+	border: 1px solid #666;
+	background: #1e1e1e;
+	padding: 2em;
+    max-width: none;
+    margin: 0;
+    margin-bottom: auto;
 }
-pre code { padding: 0; font-size: 1em; background: none; border: 0; }
-.org-src-container { margin: 1.5rem 0; }
-.org-src-container pre { margin: 0; }
-table {
-  display: block;
-  width: max-content;
-  max-width: 100%;
-  margin: 1.5rem 0;
-  overflow-x: auto;
-  border-collapse: collapse;
-  font-size: .95em;
+
+a {
+	color: #62afff;
+	text-decoration: none;
+	padding: 1px
 }
-th, td { padding: .45em .75em; text-align: left; border: 1px solid var(--s3-border); }
-thead th { background: var(--s3-surface); font-weight: 600; }
-caption { caption-side: top; padding-bottom: .4em; text-align: left; font-size: .9em; color: var(--s3-muted); }
+
+a:hover {
+	color: #ff5370
+}
+
 #table-of-contents {
-  margin: 0 0 2.5rem;
-  padding: .9rem 1.2rem;
-  background: var(--s3-surface);
-  border: 1px solid var(--s3-border);
-  border-radius: 8px;
+	margin: 1em 0;
+	padding: .1em
 }
-#table-of-contents h2 {
-  margin: 0 0 .4rem;
-  padding: 0;
-  border: 0;
-  font-size: .78rem;
-  letter-spacing: .08em;
-  text-transform: uppercase;
-  color: var(--s3-muted);
+
+div#content div#org-div-home-and-up {
+	background: #001323;
+	color: #fff
 }
-#table-of-contents ul { margin: 0; padding-left: 1.1rem; }
-#table-of-contents li { margin: .1em 0; }
+
+div#org-div-home-and-up a:link,div#org-div-home-and-up a:visited {
+	color: #fff;
+	background: #001323
+}
+
+div#org-div-home-and-up a:hover {
+	color: #ff5370
+}
+
+div.title {
+	margin: -1em -1em 0;
+	font-size: 200%;
+	font-weight: bold;
+	background: #001323;
+	color: #fff;
+	padding: .75em 1em;
+	font-family: \"BitStream Vera Sans\",Verdana;
+	letter-spacing: .1em
+}
+
+h1 {
+	background: #001323;
+	color: #fff;
+	font-size: 200%;
+	font-weight: bold;
+	letter-spacing: .1em;
+	margin: -1em -1em .2em;
+	padding: .75em 1em
+}
+
+h2 {
+	font-size: 180%;
+	border-bottom: 1px solid #555;
+	padding: .2em
+}
+
+h3,h4 {
+	font-size: 120%;
+	border-bottom: 1px solid #444
+}
+
+tt {
+	color: #39f
+}
+
+.verbatim {
+	margin: .5em 0
+}
+
+pre.src-shell {
+    background: #0f1015;
+}
+
+pre.src-example {
+    background: #282928 !important;
+}
+
+pre {
+	font-weight: bolder;
+	border: none;
+	padding: 1em;
+	color: #e0e0e0;
+	margin: 1em 0 1em 0;
+	padding: 5pt;
+	color: #e0e0e0;
+	font-family: courier,monospace;
+	font-size: 0.8em;
+	background: #181f29;
+    max-width: 90.5em;
+    border-bottom: 2px solid #573b3b;
+}
+
+.verbatim-caption {
+	border: 1px solid #555;
+	background: #222;
+	display: block;
+	font-size: 80%;
+	padding: .2em
+}
+
+div#postamble {
+	text-align: left;
+	color: #999;
+	font-size: 80%;
+	padding: 0;
+	margin: 0
+}
+
+div#postamble a {
+	color: #62afff
+}
+
+div#postamble a:hover {
+	color: #ff5370
+}
+
+table {
+	font-size: 100%;
+	border-collapse: collapse;
+	margin: .5em 0;
+	color: #e0e0e0
+}
+
+th,td {
+	border: 1px solid #555;
+	padding: .3em;
+	margin: 2px
+}
+
+th {
+	background: #333
+}
+
+span.underline {
+	text-decoration: underline
+}
+
+.fixme {
+	background: #ff9800;
+	font-weight: bold
+}
+
+.ra {
+	text-align: right
+}
+
+.sidebar {
+	float: right;
+	width: 25em;
+	background-color: #6a1b9a;
+	color: #fff;
+	margin: 2em -2em 2em 2em;
+	padding: 1em
+}
+
+.sidebar a {
+	border: none
+}
+
+.sidebar a:link {
+	color: #80deea
+}
+
+.sidebar a:visited {
+	color: #26c6da
+}
+
+.sidebar a:hover {
+	color: #ffcc80
+}
+
+.sidebar a:active {
+	color: #ff5370
+}
+
+.title {
+	text-align: center
+}
+
+.todo {
+	color: #f44336
+}
+
+.done {
+	color: #4caf50
+}
+
+.timestamp {
+	color: #9e9e9e
+}
+
+.timestamp-kwd {
+	color: #f48fb1
+}
+
 .tag {
-  padding: .05em .4em;
-  font-size: 75%;
-  font-weight: 400;
-  color: var(--s3-muted);
-  background: var(--s3-surface);
-  border: 1px solid var(--s3-border);
-  border-radius: 4px;
+	background-color: #1e88e5;
+	font-weight: normal
 }
-.todo { color: var(--s3-kw); font-weight: 600; }
-.done { color: #1a7f37; font-weight: 600; }
-.priority { color: var(--s3-warn); }
-.timestamp { font-size: .9em; color: var(--s3-muted); }
-.timestamp-kwd { color: var(--s3-accent); }
-.underline { text-decoration: underline; }
-.org-right { text-align: right; }
-.org-left { text-align: left; }
-.org-center { margin-left: auto; margin-right: auto; text-align: center; }
-p.verse { margin-left: 1.5rem; font-style: italic; }
-.footpara { display: inline; margin: 0; }
-.footdef { margin: .4em 0; font-size: .92em; }
-#footnotes h2 { font-size: 1rem; }
-#preamble, #postamble { font-size: .85rem; color: var(--s3-muted); }
-#postamble { margin-top: 3rem; padding-top: 1.2rem; border-top: 1px solid var(--s3-border); }
-#postamble p { margin: .25em 0; }
-#org-download { margin-top: 2rem; font-size: .9rem; }
+
+.target {
+	background-color: #8e24aa
+}
+
+pre.src:before {
+    margin-right: 0.5em;
+}
+
+.org-ul li {
+	padding-top: 0.5em;
+}
+
+details {
+	margin: 2em;
+}
+
+.code-block-container {
+	border-radius: 5px;
+	overflow: visible;
+	margin-bottom: 1em;
+	box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    max-width: 80em;
+}
+
+.code-block-header {
+	background: #0d0d0d;
+    border-bottom: 2px solid #573b3b;
+	padding: 0.1em 1em 0.2em 0.5em;
+	font-family: sans-serif;
+	font-weight: bold;
+	font-size: 0.9em;
+    max-width: 80em;
+}
+
+.code-block-header.shell {
+    color: #27d75b;
+}
+
+.code-block-header.lang {
+    color: #606c71;
+}
+
+.code-block-container pre {
+	margin: 0;
+}
+
+span.filename {
+    font-family: monospace;
+    font-size: 2em;
+    margin-left: 0.5em;
+}
+
+span.org-parameter {
+    background-color: #202020;
+    padding: 0 0.5em;
+    border-radius: 5px;
+    font-size: 1.1em;
+}
+
+/* --- Fixed from the source theme ------------------------------------------ */
+/* The original rule nested `h1.title' inside `div#content' and left the
+   @media block unterminated, which swallowed everything after it. */
+@media screen and (max-width:768px) {
+	div#content {
+		padding: 0 0.5em 0.5em 0.5em;
+	}
+	h1.title {
+		margin-top: 0;
+	}
+}
+
+/* --- Added for s3-publish ------------------------------------------------- */
+
+/* Dark-only theme: match form controls and scrollbars to it. */
+:root { color-scheme: dark; }
+
+/* `org-html-self-link-headlines' wraps each heading's text in a link to its
+   own anchor, so clicking a heading puts that anchor in the address bar.
+   Headings must still read as headings, so the link only shows on hover. */
+h1 a, h2 a, h3 a, h4 a, h5 a, h6 a {
+	color: inherit;
+	text-decoration: none;
+}
+h2 a:hover, h3 a:hover, h4 a:hover, h5 a:hover, h6 a:hover {
+	color: #62afff;
+}
+h2 a:hover::after, h3 a:hover::after, h4 a:hover::after,
+h5 a:hover::after, h6 a:hover::after {
+	content: \" #\";
+	color: #ff5370;
+	font-weight: normal;
+}
+/* Keep a linked heading clear of a fixed-position browser chrome and give
+   :target a visible landing cue. */
+h1, h2, h3, h4, h5, h6 { scroll-margin-top: 1em; }
+:target { scroll-margin-top: 1em; }
+
+/* Org emits `pre.example' for a block with no language, which is what a
+   Markdown fence without a language becomes.  The source theme's
+   `pre.src-example' rule never matches any Org output. */
+pre.example {
+	background: #282928;
+}
+
+/* Markdown images are not size-constrained at the source, so cap them. */
+#content img {
+	max-width: 100%;
+	height: auto;
+}
+
+/* The source-file link s3-publish appends to the bottom of every page. */
+#org-download {
+	margin-top: 2em;
+	padding-top: 1em;
+	border-top: 1px solid #555;
+	font-size: 90%;
+}
 #org-download a {
-  display: inline-block;
-  padding: .4em .9em;
-  background: var(--s3-surface);
-  border: 1px solid var(--s3-border);
-  border-radius: 6px;
+	display: inline-block;
+	padding: 0.4em 0.9em;
+	border: 1px solid #555;
+	border-radius: 5px;
+	background: #181f29;
 }
-#org-download a:hover { border-color: var(--s3-accent); text-decoration: none; }
-pre .org-keyword, pre .org-preprocessor { color: var(--s3-kw); }
-pre .org-string, pre .org-doc { color: var(--s3-str); }
-pre .org-comment, pre .org-comment-delimiter { color: var(--s3-com); font-style: italic; }
-pre .org-function-name { color: var(--s3-fn); }
-pre .org-variable-name { color: var(--s3-var); }
-pre .org-type, pre .org-constant { color: var(--s3-type); }
-pre .org-builtin { color: var(--s3-builtin); }
-pre .org-warning { color: var(--s3-warn); }
+#org-download a:hover {
+	border-color: #ff5370;
+}
+
+/* Source block syntax colours.  s3-publish sets
+   `org-html-htmlize-output-type' to `css', so htmlize emits these classes
+   instead of baking the running Emacs theme's colours into every block. */
+pre .org-keyword, pre .org-preprocessor { color: #ff7b72; }
+pre .org-string, pre .org-doc { color: #a5d6ff; }
+pre .org-comment, pre .org-comment-delimiter { color: #8b949e; font-style: italic; }
+pre .org-function-name { color: #d2a8ff; }
+pre .org-variable-name { color: #ffa657; }
+pre .org-type, pre .org-constant { color: #79c0ff; }
+pre .org-builtin { color: #d2a8ff; }
+pre .org-warning { color: #ffa198; }
+
+/* s3-publish rewrites the TOC's generic \"Table of Contents\" heading to the
+   document's own title, so the contents read as nested beneath it. */
+#table-of-contents h2.toc-title {
+	font-size: 110%;
+	margin: 0 0 .5em 0;
+	padding: 0 0 .3em 0;
+	border-bottom: 1px solid #555;
+	letter-spacing: 0;
+}
+#table-of-contents h2.toc-title a {
+	color: #e0e0e0;
+	text-decoration: none;
+}
+#table-of-contents h2.toc-title a:hover {
+	color: #62afff;
+}
+#text-table-of-contents ul ul {
+	padding-left: 1.1em;
+}
+
+/* On a wide screen the table of contents moves into its own sticky,
+   scrollable column on the right, narrower than the content, so it stays
+   visible however far you scroll.
+
+   Org renders the TOC as a sibling inside #content, so #content becomes a
+   two column grid: every child lands in column 1, the TOC is pinned to
+   column 2, and the title banner spans both.  The TOC spans far more rows
+   than any document has, which is what gives the sticky box room to travel
+   -- the surplus rows are empty, and with no row gap they add no height, so
+   the grid must never set `gap' or `row-gap', only `column-gap'.
+
+   `:has()' keeps the sidebar off documents exported without a TOC, which
+   would otherwise leave an empty column.  A browser without `:has()' drops
+   the whole block and keeps the single column layout. */
+@media screen and (min-width: 1100px) {
+	div#content:has(> #table-of-contents) {
+		display: grid;
+		grid-template-columns: minmax(0, 1fr) 17em;
+		column-gap: 2.5em;
+	}
+	div#content:has(> #table-of-contents) > * {
+		grid-column: 1;
+		min-width: 0;
+	}
+	div#content:has(> #table-of-contents) > h1.title,
+	div#content:has(> #table-of-contents) > div.title {
+		grid-column: 1 / -1;
+	}
+	div#content > #table-of-contents {
+		grid-column: 2;
+		grid-row: 2 / span 500;
+		align-self: start;
+		position: sticky;
+		top: 1.5em;
+		max-height: calc(100vh - 3em);
+		display: flex;
+		flex-direction: column;
+		margin: 0;
+		padding: 0;
+	}
+	/* The heading stays put; only the list scrolls. */
+	#text-table-of-contents {
+		min-height: 0;
+		overflow-y: auto;
+		overscroll-behavior: contain;
+		font-size: 90%;
+	}
+	#text-table-of-contents ul {
+		margin: 0;
+		padding-left: 1.1em;
+	}
+	#text-table-of-contents > ul {
+		padding-left: 0;
+		list-style: none;
+	}
+	#text-table-of-contents li {
+		padding-top: .3em;
+	}
+}
 "
   "A self-contained stylesheet for HTML published by s3-publish.
-Styles Org's exported markup -- the title, table of contents, source
-blocks, tables and postamble -- plus the source link s3-publish appends.
-Adapts to the reader's light or dark preference.  See
+Adapted from the author's simple_dark Emacs HTML theme, with rules added
+for the markup that theme does not cover: source block syntax classes,
+self-linking headings, the table of contents sidebar, example blocks,
+images, and the source-file link s3-publish appends.
+Inline code is set smaller than in the source theme.  Dark only.  See
 `s3-publish-html-theme'.")
+
 
 (defcustom s3-publish-html-theme 'default
   "Stylesheet inlined into HTML published from Org and Markdown buffers.
 
-`default'  Embed `s3-publish-html-default-style', a self-contained theme
-           with light and dark variants.
+`default'  Embed `s3-publish-html-default-style', a self-contained dark
+           theme adapted from the author's simple_dark Emacs HTML theme.
 A file     Embed the contents of that CSS file, e.g.
            \"~/.emacs.d/theme/simple_dark.css\".
 A string   Embed it verbatim as CSS.  Any multi-line string, or any string
@@ -854,26 +1129,59 @@ Returns nil when no theme is configured."
         (buffer-string)))
      (t theme))))
 
-(defun s3-publish--call-with-html-theme (fn)
-  "Call FN with no arguments, with Org's HTML exporter themed.
-Binds the export variables that apply `s3-publish-html-theme', and calls
-FN unchanged when no theme is configured."
-  (let ((css (s3-publish--html-css)))
-    (if (null css)
-        (funcall fn)
-      (let (;; Our stylesheet replaces Org's, rather than patching over it.
-            (org-html-head-include-default-style nil)
-            ;; Prepended, so a document's own `#+HTML_HEAD:' still overrides
-            ;; the theme and any head the user configured stays in place.
-            (org-html-head (concat "<style type=\"text/css\">\n" css "</style>\n"
-                                   org-html-head))
-            ;; Org otherwise bakes the running Emacs theme's colours into
-            ;; every source block, which fights the page theme.  Emit
-            ;; classes instead and let the stylesheet colour them.
-            (org-html-htmlize-output-type 'css)
-            ;; A themed page is a modern page; skip the XHTML 1.0 prologue.
-            (org-html-doctype "html5"))
-        (funcall fn)))))
+(defcustom s3-publish-html-self-link-headlines t
+  "When non-nil, every heading in published HTML links to its own anchor.
+
+Org only gives headings an `id', reachable from the table of contents.
+With this enabled each heading's text is a link to that `id', so clicking
+a heading anywhere on the page puts its anchor in the address bar, ready
+to copy and share.
+
+`s3-publish-html-default-style' styles these links to still read as
+headings, revealing themselves only on hover.  A custom
+`s3-publish-html-theme' will want to do the same, or headings render as
+ordinary links."
+  :type 'boolean
+  :group 's3-publish)
+
+(defun s3-publish--call-with-html-export-settings (fn)
+  "Call FN with no arguments, with Org's HTML exporter configured.
+Applies `s3-publish-html-self-link-headlines' and the stylesheet selected
+by `s3-publish-html-theme'.  Each is skipped when not configured, so
+setting both off leaves your own Org export settings untouched."
+  (let* ((css (s3-publish--html-css))
+         (thunk
+          (if (null css)
+              fn
+            (lambda ()
+              (let (;; Our stylesheet replaces Org's, rather than patching
+                    ;; over it.
+                    (org-html-head-include-default-style nil)
+                    ;; Prepended, so a document's own `#+HTML_HEAD:' still
+                    ;; overrides the theme and any head the user configured
+                    ;; stays in place.
+                    (org-html-head (concat "<style type=\"text/css\">\n" css
+                                           "</style>\n" org-html-head))
+                    ;; Org otherwise bakes the running Emacs theme's colours
+                    ;; into every source block, which fights the page theme.
+                    ;; Emit classes instead and let the stylesheet colour them.
+                    (org-html-htmlize-output-type 'css)
+                    ;; A themed page is a modern page; skip the XHTML 1.0
+                    ;; prologue.
+                    (org-html-doctype "html5"))
+                (funcall fn))))))
+    (if (null s3-publish-html-self-link-headlines)
+        (funcall thunk)
+      (let ((org-html-self-link-headlines t)
+            ;; Org's generated ids are content hashes that change on every
+            ;; export, so a shared anchor stops resolving as soon as the
+            ;; document is republished.  Prefer a `:CUSTOM_ID:' where the
+            ;; document provides one -- Markdown always does, see
+            ;; `s3-publish-markdown-to-org' -- which keeps anchors both
+            ;; stable across publishes and readable in a URL.
+            (org-html-prefer-user-labels t))
+        (funcall thunk)))))
+
 
 ;;; Shared publishing core ----------------------------------------------------
 ;; Both the Org and Markdown publishers go through this, so the two stay
@@ -975,6 +1283,39 @@ Returns the HTML URL, which is also copied to the kill ring."
       (message "%s" html-url)
       html-url)))
 
+(defun s3-publish--rewrite-toc-heading (html-file)
+  "Retitle the table of contents in HTML-FILE with the document's own title.
+
+Org heads the contents list \"Table of Contents\", which tells a reader
+nothing the list does not already show.  The document's first header --
+its title -- is more use there, and makes the entries read as nested
+beneath it.  The heading links back to the top of the document.
+
+When the document has no title the heading is dropped rather than
+replaced.  Does nothing when the document was exported without a table of
+contents."
+  (with-temp-buffer
+    (insert-file-contents html-file)
+    (let ((title nil)
+          (modified nil))
+      (goto-char (point-min))
+      (when (re-search-forward
+             "<h1 class=\"title\">\\(\\(?:.\\|\n\\)*?\\)</h1>" nil t)
+        (setq title (match-string 1)))
+      (goto-char (point-min))
+      (when (and (re-search-forward "<div id=\"table-of-contents\"[^>]*>" nil t)
+                 (re-search-forward "[ \t\n]*<h2>\\(?:.\\|\n\\)*?</h2>\n?" nil t))
+        (replace-match
+         (if title
+             (format "\n<h2 class=\"toc-title\"><a href=\"#content\">%s</a></h2>\n"
+                     title)
+           "\n")
+         t t)
+        (setq modified t))
+      (when modified
+        (write-region (point-min) (point-max) html-file nil 'quiet))))
+  html-file)
+
 (defun s3-publish--export-buffer-to-html ()
   "Export the current Org buffer to HTML and return an absolute file name.
 The export is themed according to `s3-publish-html-theme'.  Both the Org
@@ -984,10 +1325,13 @@ identically.
 `org-html-export-to-html' returns a name relative to the Org buffer's
 `default-directory', which stops resolving once another buffer is current,
 so it is expanded here while that buffer is still active."
-  (s3-publish--call-with-html-theme
+  (s3-publish--call-with-html-export-settings
    (lambda ()
-     (let ((html-file (expand-file-name (org-html-export-to-html))))
-       (if (file-symlink-p html-file) (file-truename html-file) html-file)))))
+     (let* ((html-file (expand-file-name (org-html-export-to-html)))
+            (html-file (if (file-symlink-p html-file)
+                           (file-truename html-file)
+                         html-file)))
+       (s3-publish--rewrite-toc-heading html-file)))))
 
 (defun s3-publish--org-string-export-to-html (org-text)
   "Export ORG-TEXT, a string of Org markup, to a temporary HTML file.
@@ -1242,6 +1586,33 @@ are nil when absent.  LINES is returned unchanged if the block never closes."
   (and (string-match-p "^[ \t]*|" line)
        (string-match-p "^[ \t]*|[ \t:|-]*-[ \t:|-]*$" line)))
 
+(defvar s3-publish--md-slugs nil
+  "Anchor slugs already used while converting one Markdown document.
+A hash table, bound by `s3-publish-markdown-to-org'.  Nil outside a
+conversion, in which case slugs are not uniquified.")
+
+(defun s3-publish--md-slug (text)
+  "Return an anchor slug for Markdown heading TEXT.
+
+Slugs are lowercase and dash separated, so a published anchor reads as
+part of the URL.  Within one document they are uniquified with a numeric
+suffix, since two headings may share a name."
+  (let* ((plain text)
+         ;; Keep a link's text and drop its target, or the URL lands in the
+         ;; slug.
+         (plain (replace-regexp-in-string "!?\\[\\([^][]*\\)\\]([^)]*)" "\\1" plain))
+         (plain (replace-regexp-in-string "[^[:alnum:]]+" "-" (downcase plain)))
+         (base (replace-regexp-in-string "\\(?:^-+\\|-+$\\)" "" plain))
+         (base (if (string= base "") "section" base))
+         (slug base)
+         (n 1))
+    (when s3-publish--md-slugs
+      (while (gethash slug s3-publish--md-slugs)
+        (setq n (1+ n))
+        (setq slug (format "%s-%d" base n)))
+      (puthash slug t s3-publish--md-slugs))
+    slug))
+
 (defun s3-publish--md-convert-lines (lines shift)
   "Convert Markdown LINES to a list of Org lines.
 SHIFT is subtracted from every ATX heading level; headings that fall below
@@ -1283,7 +1654,14 @@ level 1 are dropped, which is how a promoted title is removed from the body."
             (when (>= level 1)
               (push (concat (make-string level ?*) " "
                             (s3-publish--md-inline-to-org text))
-                    out))))
+                    out)
+              ;; A CUSTOM_ID gives the heading a stable, readable anchor.
+              ;; Org's own ids are content hashes that change on every
+              ;; export, so a shared link stops resolving as soon as the
+              ;; document is republished.  See `org-html-prefer-user-labels'.
+              (push ":PROPERTIES:" out)
+              (push (concat ":CUSTOM_ID: " (s3-publish--md-slug text)) out)
+              (push ":END:" out))))
          ;; Blockquote: gather the run, convert its contents, wrap it.
          ((string-match-p "^[ \t]*>" line)
           (let ((quoted '()))
@@ -1380,7 +1758,8 @@ as ordinary text rather than converted."
      ;; Markdown uses _ and ^ as ordinary characters; stop Org's exporter
      ;; from reading snake_case and a^b as subscripts and superscripts.
      "#+OPTIONS: ^:nil\n\n"
-     (mapconcat #'identity (s3-publish--md-convert-lines body shift) "\n")
+     (let ((s3-publish--md-slugs (make-hash-table :test 'equal)))
+       (mapconcat #'identity (s3-publish--md-convert-lines body shift) "\n"))
      "\n")))
 
 (defun s3-publish--markdown-to-org-string (markdown)

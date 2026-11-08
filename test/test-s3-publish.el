@@ -4,10 +4,15 @@
 (require 's3-publish)
 
 (defun test-s3-publish--org (markdown)
-  "Convert MARKDOWN and return only its body, without the generated header."
+  "Convert MARKDOWN and return its body, without the header or anchor drawers.
+Heading anchors are covered separately; stripping the `:PROPERTIES:'
+drawers keeps these tests about the markup itself."
   (let* ((org (s3-publish-markdown-to-org markdown))
-         (start (string-match "#\\+OPTIONS: \\^:nil\n\n" org)))
-    (string-trim (substring org (match-end 0)))))
+         (start (string-match "#\\+OPTIONS: \\^:nil\n\n" org))
+         (body (substring org (match-end 0)))
+         (body (replace-regexp-in-string
+                "^:PROPERTIES:\n\\(?:.*\n\\)*?:END:\n" "" body)))
+    (string-trim body)))
 
 (defun test-s3-publish--keyword (markdown keyword)
   "Return the value of KEYWORD in the Org produced from MARKDOWN."
@@ -220,7 +225,7 @@
       (should (string-match-p "<b>bold</b>" html))
       ;; The theme is embedded, so the page is self-contained.
       (should (string-match-p "<style type=\"text/css\">" html))
-      (should (string-match-p "prefers-color-scheme" html))
+      (should (string-match-p "background: #121212" html))
       ;; Org's minimal default stylesheet is replaced, not layered under ours.
       (should-not (string-match-p "#content { max-width: 60em" html))
       (delete-file html-file)))
@@ -231,7 +236,7 @@
          (html-file (s3-publish--org-string-export-to-html "* Section\n"))
          (html (with-temp-buffer (insert-file-contents html-file) (buffer-string))))
     (should (string-match-p "#content { max-width: 60em" html))
-    (should-not (string-match-p "prefers-color-scheme" html))
+    (should-not (string-match-p "background: #121212" html))
     (delete-file html-file)))
 
 (ert-deftest s3-publish-test-theme-from-css-file ()
@@ -263,7 +268,7 @@
                      "#+HTML_HEAD: <style>body { color: olive; }</style>\n* Section\n"))
          (html (with-temp-buffer (insert-file-contents html-file) (buffer-string))))
     (should (string-match-p "body { color: olive; }" html))
-    (should-not (string-match-p "prefers-color-scheme" html))
+    (should-not (string-match-p "background: #121212" html))
     (delete-file html-file)))
 
 (ert-deftest s3-publish-test-markdown-buffer-p ()
@@ -285,5 +290,122 @@
     (should (equal (file-name-extension md-key) "md"))
     (should (equal (concat base ".html")
                    (concat (file-name-sans-extension md-key) ".html")))))
+
+
+;;; Anchors, self-linking headings and the table of contents
+
+(defun test-s3-publish--export-body (org-text)
+  "Export ORG-TEXT and return just the <body> of the resulting HTML.
+Scoped to the body so the embedded stylesheet cannot satisfy a match."
+  (let* ((file (s3-publish--org-string-export-to-html org-text))
+         (html (with-temp-buffer (insert-file-contents file) (buffer-string))))
+    (delete-file file)
+    (substring html (string-match "<body>" html))))
+
+(ert-deftest s3-publish-test-headings-link-to-themselves ()
+  "Every heading's text is a link to its own anchor, not just a TOC target."
+  (let ((body (test-s3-publish--export-body
+               "#+TITLE: T\n* One\n:PROPERTIES:\n:CUSTOM_ID: one\n:END:\n")))
+    (should (string-match-p
+             "<h2 id=\"one\">.*<a href=\"#one\">One</a></h2>" body))))
+
+(ert-deftest s3-publish-test-self-links-can-be-disabled ()
+  "With `s3-publish-html-self-link-headlines' nil, headings are plain."
+  (let* ((s3-publish-html-self-link-headlines nil)
+         (body (test-s3-publish--export-body "#+TITLE: T\n* One\n")))
+    (should (string-match-p "<h2 id=\"[^\"]+\">" body))
+    (should-not (string-match-p "<h2 id=\"[^\"]*\">[^<]*<span[^>]*>[^<]*</span> <a href=" body))))
+
+(ert-deftest s3-publish-test-markdown-anchors-are-readable ()
+  "Markdown headings get slug anchors instead of Org's content hashes."
+  (let ((body (test-s3-publish--export-body
+               (s3-publish-markdown-to-org
+                "# Doc\n\n## Getting Started\n\n### Install the CLI\n"))))
+    (should (string-match-p "id=\"getting-started\"" body))
+    (should (string-match-p "id=\"install-the-cli\"" body))
+    (should (string-match-p "href=\"#getting-started\"" body))))
+
+(ert-deftest s3-publish-test-markdown-anchors-are-stable ()
+  "The same Markdown always yields the same anchors, so shared links keep working.
+Org's generated ids are content hashes that change between exports."
+  (let ((md "# Doc\n\n## Alpha\n\nText.\n\n## Beta\n"))
+    (should (equal (s3-publish-markdown-to-org md)
+                   (s3-publish-markdown-to-org md)))
+    (should (string-match-p ":CUSTOM_ID: alpha" (s3-publish-markdown-to-org md)))
+    (should (string-match-p ":CUSTOM_ID: beta" (s3-publish-markdown-to-org md)))))
+
+(ert-deftest s3-publish-test-markdown-slugs ()
+  "Slugs are lowercase and dash separated, and drop link targets and markup."
+  (let ((s3-publish--md-slugs nil))
+    (should (equal (s3-publish--md-slug "Getting Started") "getting-started"))
+    (should (equal (s3-publish--md-slug "**Bold** heading!") "bold-heading"))
+    (should (equal (s3-publish--md-slug "`code` & more") "code-more"))
+    (should (equal (s3-publish--md-slug "[Docs](https://e.com/x)") "docs"))
+    (should (equal (s3-publish--md-slug "???") "section"))))
+
+(ert-deftest s3-publish-test-duplicate-headings-get-distinct-anchors ()
+  "Two headings with the same name must not share an anchor."
+  (let ((org (s3-publish-markdown-to-org "# Doc\n\n## Notes\n\n### Notes\n")))
+    (should (string-match-p ":CUSTOM_ID: notes\n" org))
+    (should (string-match-p ":CUSTOM_ID: notes-2\n" org))))
+
+(ert-deftest s3-publish-test-toc-heading-is-the-document-title ()
+  "The contents list is headed by the document's own title, linking to the top."
+  (let ((body (test-s3-publish--export-body "#+TITLE: Real Title\n* One\n** Two\n")))
+    (should (string-match-p
+             "<h2 class=\"toc-title\"><a href=\"#content\">Real Title</a></h2>" body))
+    ;; "Table of Contents" says nothing the list does not already show.
+    (should-not (string-match-p "Table of Contents" body))))
+
+(ert-deftest s3-publish-test-toc-heading-dropped-without-a-title ()
+  "With no title there is no heading to use, so the TOC gets none."
+  (let ((body (test-s3-publish--export-body "* One\n** Two\n")))
+    (should (string-match-p "<div id=\"table-of-contents\"" body))
+    (should-not (string-match-p "Table of Contents" body))
+    (should-not (string-match-p "toc-title" body))))
+
+(ert-deftest s3-publish-test-markdown-toc-heading-is-promoted-h1 ()
+  "A Markdown document's first header becomes both its title and TOC heading."
+  (let ((body (test-s3-publish--export-body
+               (s3-publish-markdown-to-org "# My Doc\n\n## Section\n"))))
+    (should (string-match-p "<h1 class=\"title\">My Doc</h1>" body))
+    (should (string-match-p
+             "<h2 class=\"toc-title\"><a href=\"#content\">My Doc</a></h2>" body))))
+
+(ert-deftest s3-publish-test-toc-untouched-without-a-toc ()
+  "A document exported without a contents list is left alone."
+  (let ((body (test-s3-publish--export-body
+               "#+TITLE: T\n#+OPTIONS: toc:nil\n* One\n")))
+    (should-not (string-match-p "table-of-contents" body))
+    (should (string-match-p "<h1 class=\"title\">T</h1>" body))))
+
+(ert-deftest s3-publish-test-theme-styles-its-own-additions ()
+  "The theme covers the markup the source simple_dark theme does not."
+  (let ((css s3-publish-html-default-style))
+    ;; Carried over from simple_dark.
+    (should (string-match-p "background: #121212" css))
+    ;; Added, because Org emits these and simple_dark has no rule for them.
+    (should (string-match-p "#org-download a" css))
+    (should (string-match-p "pre \\.org-keyword" css))
+    (should (string-match-p "h2\\.toc-title" css))
+    (should (string-match-p "pre\\.example" css))
+    ;; Inline code is deliberately smaller than in the source theme; a
+    ;; fresh copy of simple_dark would silently restore 1.5em.
+    (should-not (string-match-p "font-size: 1\\.5em" css))
+    ;; The TOC sidebar relies on a row span, which a row gap would multiply
+    ;; into the page height.
+    (should (string-match-p "grid-row: 2 / span 500" css))
+    (should-not (string-match-p "^[ \t]*\\(gap\\|row-gap\\):" css))
+    ;; Dark only now, so no light variant is advertised.
+    (should (string-match-p "color-scheme: dark" css))))
+
+(ert-deftest s3-publish-test-theme-css-braces-balance ()
+  "Unbalanced braces in the theme would swallow the rules that follow."
+  (let ((css s3-publish-html-default-style)
+        (open 0) (close 0))
+    (dotimes (i (length css))
+      (cond ((eq (aref css i) ?{) (setq open (1+ open)))
+            ((eq (aref css i) ?}) (setq close (1+ close)))))
+    (should (= open close))))
 
 (provide 'test-s3-publish)
