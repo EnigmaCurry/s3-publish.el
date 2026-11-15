@@ -4296,9 +4296,12 @@ links resolve against FILE's directory, as they would from FILE itself."
 
 (defun s3-publish--api-result (url keys)
   "Return the result of an API publish of URL as KEYS."
-  (let ((job s3-publish--job-counter))
-    (append (list :url url :keys keys :job job)
-            (s3-publish-api-status job))))
+  (let* ((job s3-publish--job-counter)
+         (status (s3-publish-api-status job)))
+    (append (list :url url :keys keys :job job
+                  :status (plist-get status :status))
+            (and (plist-get status :error)
+                 (list :error (plist-get status :error))))))
 
 (defun s3-publish-api-publish (file profile-name &optional title)
   "Publish FILE with the profile named PROFILE-NAME, without prompting.
