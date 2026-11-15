@@ -436,7 +436,7 @@ Org's generated ids are content hashes that change between exports."
     ;; into the page height.
     (should (string-match-p "grid-row: 2 / span 500" css))
     (should-not (string-match-p "^[ \t]*\\(gap\\|row-gap\\):" css))
-    ;; Dark only now, so no light variant is advertised.
+    ;; The base theme is dark; light comes from `s3-publish-html-light-style'.
     (should (string-match-p "color-scheme: dark" css))))
 
 (ert-deftest s3-publish-test-theme-css-braces-balance ()
@@ -475,6 +475,11 @@ Org's generated ids are content hashes that change between exports."
                css)))
     (let ((s3-publish-html-color-scheme 'sepia))
       (should-error (s3-publish--html-css)))))
+
+(ert-deftest s3-publish-test-color-scheme-follows-reader-by-default ()
+  "Out of the box, pages follow the reader's own light or dark preference."
+  (should (eq (eval (car (get 's3-publish-html-color-scheme 'standard-value)) t)
+              'auto)))
 
 (ert-deftest s3-publish-test-color-scheme-only-for-built-in-theme ()
   "A custom theme is used as is, whatever the colour scheme."

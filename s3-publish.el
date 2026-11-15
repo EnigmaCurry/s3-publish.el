@@ -1179,7 +1179,8 @@ details {
 /* Shared verbatim with the copy embedded in s3-publish.el as
    `s3-publish-html-default-style'.  Keep the two in step. */
 
-/* Dark-only theme: match form controls and scrollbars to it. */
+/* Dark theme: match form controls and scrollbars to it.  The light
+   overrides set this back to light. */
 :root { color-scheme: dark; }
 
 /* `org-html-self-link-headlines' wraps each heading's text in a link to its
@@ -1398,7 +1399,8 @@ added for the markup that theme does not cover: source block syntax
 classes, self-linking headings, the table of contents sidebar, example
 blocks, images, the relocated postamble, and the source-file link
 s3-publish appends.  Inline code is set smaller than in the source
-theme.  Dark only.  See `s3-publish-html-theme'.")
+theme.  Dark; `s3-publish-html-light-style' makes it light, see
+`s3-publish-html-color-scheme'.  See `s3-publish-html-theme'.")
 
 
 
@@ -1453,20 +1455,20 @@ div#content > #postamble { border-top-color: #d0d7de; }
 Only colours: the layout stays the dark theme's.  See
 `s3-publish-html-color-scheme'.")
 
-(defcustom s3-publish-html-color-scheme 'dark
+(defcustom s3-publish-html-color-scheme 'auto
   "Whether the built-in theme is dark, light, or follows the reader.
 
-`dark'   Light text on a dark page.
-`light'  Dark text on a light page.
-`auto'   Dark or light to match the reader's system setting, through the
-         `prefers-color-scheme' media query.  Dark when a browser does
-         not say.
+`auto'   Dark or light to match each reader's own browser or system
+         setting, through the `prefers-color-scheme' media query.  Dark
+         when a browser does not say.  The default.
+`dark'   Always light text on a dark page.
+`light'  Always dark text on a light page.
 
 Only applies to the built-in theme, i.e. when `s3-publish-html-theme'
 is `default'."
-  :type '(choice (const :tag "Dark" dark)
-                 (const :tag "Light" light)
-                 (const :tag "Match the reader's system" auto))
+  :type '(choice (const :tag "Match the reader's system" auto)
+                 (const :tag "Dark" dark)
+                 (const :tag "Light" light))
   :group 's3-publish)
 
 (defcustom s3-publish-html-theme 'default
