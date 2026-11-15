@@ -1685,6 +1685,108 @@ A public https URL when PROFILE has :public-acl, otherwise an s3:// URI."
         (format "https://%s.%s/%s" bucket (s3-publish--host-base profile) key)
       (format "s3://%s/%s" bucket key))))
 
+;;; Signed URLs --------------------------------------------------------------
+;; An object in a private bucket has no URL anyone can open.  A signed URL
+;; is one: it carries a signature made with your secret key, and stops
+;; working when it expires.  Signing happens locally; nothing is uploaded.
+
+(defcustom s3-publish-signed-url-expiry nil
+  "How long the links s3-publish hands out for private files keep working.
+
+When nil, publishing with a profile that has no public ACL gives you an
+s3:// URI, which only someone with your credentials can use.  Set this
+to a duration and you get a signed https URL instead, which anyone can
+open until it expires: a number of seconds, or a number followed by s,
+m, h, d or w, e.g. \"12h\" or \"7d\".  The links inside a published
+page -- to its source, and to images uploaded beside it -- are signed
+too.
+
+The signature is made by `s3cmd signurl', which uses AWS signature
+version 2.  DigitalOcean Spaces, MinIO and most S3 work-alikes accept
+it; AWS regions opened since 2014 do not.  See also
+`s3-publish-sign-url'."
+  :type '(choice (const :tag "Hand out s3:// URIs" nil)
+                 (string :tag "Duration"))
+  :group 's3-publish)
+
+(defun s3-publish--parse-duration (duration)
+  "Return DURATION, e.g. \"90\", \"30m\" or \"7d\", as seconds."
+  (let ((duration (string-trim (format "%s" duration))))
+    (unless (string-match "\\`\\([0-9]+\\)[ \t]*\\([smhdw]?\\)\\'" duration)
+      (user-error "Invalid duration %S: use a number of seconds, or e.g. 30m, 12h, 7d"
+                  duration))
+    (* (string-to-number (match-string 1 duration))
+       (pcase (match-string 2 duration)
+         ((or "" "s") 1) ("m" 60) ("h" 3600) ("d" 86400) ("w" 604800)))))
+
+(defun s3-publish--signed-url (profile key seconds)
+  "Return an https URL for KEY in PROFILE's bucket that works for SECONDS."
+  (let ((output (s3-publish--s3cmd-or-error
+                 profile "Signing a URL" "signurl"
+                 (format "s3://%s/%s" (plist-get profile :bucket) key)
+                 (format "+%d" seconds))))
+    (unless (string-match "^\\(https?\\)://[^ \t\n]+" output)
+      (error "Unexpected output from s3cmd signurl: %s" output))
+    ;; s3cmd prints http:// whatever the config says.  The scheme is not
+    ;; part of the signature, so the same URL works over https.
+    (concat "https" (substring (match-string 0 output) (length (match-string 1 output))))))
+
+(defun s3-publish--shareable-url (profile key)
+  "Return the URL to hand out for KEY in PROFILE's bucket.
+That is its public URL, or a signed one for a private bucket when
+`s3-publish-signed-url-expiry' is set, and otherwise its s3:// URI."
+  (if (or (plist-get profile :public-acl)
+          (null s3-publish-signed-url-expiry))
+      (s3-publish--object-url profile key)
+    (s3-publish--signed-url
+     profile key (s3-publish--parse-duration s3-publish-signed-url-expiry))))
+
+(defun s3-publish--buffer-key (profile)
+  "Return the key the current buffer's file is published under in PROFILE.
+For an Org or Markdown document that is its HTML page."
+  (when buffer-file-name
+    (let ((key (s3-publish-get-file-key buffer-file-name
+                                        (plist-get profile :salt))))
+      (if (or (derived-mode-p 'org-mode) (s3-publish--markdown-buffer-p))
+          (concat (file-name-sans-extension key) ".html")
+        key))))
+
+(defun s3-publish-sign-url (profile-name object duration)
+  "Copy a signed URL for OBJECT, which works for DURATION.
+
+Use this to share a file from a private bucket, or to give out a link
+that stops working.  PROFILE-NAME names the profile whose bucket and
+credentials to use.  OBJECT is a URL, an s3:// URI or a bare key; it
+defaults to what the current buffer is published as.  DURATION is a
+number of seconds or e.g. \"12h\" or \"7d\"; see
+`s3-publish-signed-url-expiry'.
+
+The URL is signed locally: nothing is checked or uploaded, so it is
+not an error to sign a key that does not exist."
+  (interactive
+   (let* ((name (s3-publish--read-profile-name))
+          (profile (s3-publish-get-profile name))
+          (default (s3-publish--buffer-key profile)))
+     (list name
+           (read-string (if default
+                            (format "Object (URL, s3:// URI or key; default %s): "
+                                    default)
+                          "Object (URL, s3:// URI or key): ")
+                        nil nil default)
+           (read-string (format "Valid for (default %s): "
+                                (or s3-publish-signed-url-expiry "7d"))
+                        nil nil (or s3-publish-signed-url-expiry "7d")))))
+  (let* ((profile (s3-publish-get-credentials (s3-publish-get-profile profile-name)))
+         (object (string-trim object))
+         (key (if (string-match-p "\\`[a-zA-Z][a-zA-Z0-9+.-]*://" object)
+                  (s3-publish--url-key profile object)
+                (string-remove-prefix "/" object)))
+         (url (s3-publish--signed-url profile key
+                                      (s3-publish--parse-duration duration))))
+    (kill-new url)
+    (message "Signed URL (copied, valid for %s): %s" duration url)
+    url))
+
 (defvar s3-publish--on-save nil
   "Non-nil while `s3-publish-on-save-mode' is republishing a buffer.")
 
@@ -1723,8 +1825,8 @@ Returns the HTML URL, which is also copied to the kill ring."
                     (s3-publish-get-file-key source-file salt)))
          (source-key (concat base-key (or (file-name-extension source-file t) "")))
          (html-key (concat base-key ".html"))
-         (source-url (s3-publish--object-url profile source-key))
-         (html-url (s3-publish--object-url profile html-key))
+         (source-url (s3-publish--shareable-url profile source-key))
+         (html-url (s3-publish--shareable-url profile html-key))
          (html-file (funcall export-fn)))
     (setq html-file (if (file-symlink-p html-file) (file-truename html-file) html-file))
     ;; Append a link to the source file at the bottom of the content.
@@ -1956,7 +2058,7 @@ Returns the images to upload, as a list of (FILE . KEY)."
                                 file (plist-get profile :salt))))
                       (unless (assoc file uploads)
                         (push (cons file key) uploads))
-                      (setq uri (s3-publish--object-url profile key))))
+                      (setq uri (s3-publish--shareable-url profile key))))
                   (replace-match uri t t nil 1)
                   (setq modified t))))))
           (when modified
@@ -2174,7 +2276,7 @@ copy, so its key -- and URL -- is the same every time."
   (let* ((file buffer-file-name)
          (profile (s3-publish--select-profile))
          (key (s3-publish-get-file-key file (plist-get profile :salt)))
-         (url (s3-publish--object-url profile key)))
+         (url (s3-publish--shareable-url profile key)))
     (s3-publish--run url (format "%s/%s" (plist-get profile :bucket) key)
                      's3-publish-upload-file
                      (list file profile (file-name-nondirectory file)
@@ -2764,7 +2866,7 @@ RSS feed and HTML index.  Returns the URL, also copied to the kill ring."
                    ((error quit)
                     (s3-publish--delete-if-exists temp-file)
                     (signal (car err) (cdr err))))))
-    (let ((url (s3-publish--object-url
+    (let ((url (s3-publish--shareable-url
                 profile (s3-publish-get-file-key temp-file
                                                  (plist-get profile :salt)))))
       (s3-publish--run url nil 's3-publish-upload-file
@@ -2896,7 +2998,7 @@ copied to the kill ring, and returned."
     (error "One or more selected files do not exist or are not regular files"))
   (let* ((files (mapcar #'expand-file-name files))
          (urls (mapcar (lambda (file)
-                         (s3-publish--object-url
+                         (s3-publish--shareable-url
                           profile (s3-publish-get-file-key
                                    file (plist-get profile :salt))))
                        files))

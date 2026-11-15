@@ -588,6 +588,35 @@ before:
   (setq s3-publish-async nil)
 #+end_src
 
+** Private buckets and expiring links
+
+With a profile that does not make files public, publishing hands you
+an =s3://= URI, which only someone holding your credentials can use. To
+get a link you can share instead, set how long such links should work:
+
+#+begin_src emacs-lisp
+  (setq s3-publish-signed-url-expiry "7d")
+#+end_src
+
+Publishing to a private profile then copies a signed https URL, which
+anyone can open until it expires. The links inside a published page,
+to its source and to images uploaded beside it, are signed too. A
+duration is a number of seconds, or a number followed by =s=, =m=, =h=,
+=d= or =w=.
+
+To sign a link on demand -- for a file published earlier, or to hand
+out a link from a public bucket that stops working -- use:
+
+ * =M-x s3-publish-sign-url=
+ * Select the profile.
+ * Enter a URL, an =s3://= URI or a key. It defaults to what the
+   current buffer is published as.
+ * Enter how long the link should work.
+
+Links are signed locally by =s3cmd signurl=, which uses AWS signature
+version 2. DigitalOcean Spaces, MinIO and most S3 work-alikes accept
+it; AWS regions opened since 2014 do not.
+
 ** Caching
 
 Every upload is sent with a =Cache-Control: no-cache= header, so

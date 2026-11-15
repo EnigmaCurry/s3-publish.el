@@ -487,4 +487,68 @@ an error, since saving must not prompt."
               (should-not (memq #'s3-publish--republish-on-save after-save-hook)))
           (kill-buffer))))))
 
+;;; Signed URLs
+
+(ert-deftest s3-publish-test-parse-duration ()
+  "Durations are seconds, or a number with a unit."
+  (should (= (s3-publish--parse-duration "90") 90))
+  (should (= (s3-publish--parse-duration "90s") 90))
+  (should (= (s3-publish--parse-duration "30m") 1800))
+  (should (= (s3-publish--parse-duration " 12h ") 43200))
+  (should (= (s3-publish--parse-duration "7d") 604800))
+  (should (= (s3-publish--parse-duration "2w") 1209600))
+  (should (= (s3-publish--parse-duration 60) 60))
+  (should-error (s3-publish--parse-duration "soon") :type 'user-error)
+  (should-error (s3-publish--parse-duration "7y") :type 'user-error))
+
+(ert-deftest s3-publish-test-sign-url-command ()
+  "Signing accepts a key, a URL or an s3:// URI, and copies an https URL."
+  (test-s3-publish-with-fake-s3
+    (dolist (object '("k.html" "/k.html" "s3://bkt/k.html"
+                      "https://bkt.fake-endpoint/k.html"))
+      (let ((url (s3-publish-sign-url "test" object "1h")))
+        (should (equal url "https://bkt.fake-endpoint/k.html?Expires=+3600&Signature=fake"))
+        (should (equal (car kill-ring) url))))
+    (should-error (s3-publish-sign-url "test" "s3://other/k.html" "1h"))))
+
+(ert-deftest s3-publish-test-signed-url-is-https ()
+  "s3cmd prints http:// URLs; the signed URL handed out is https."
+  (cl-letf (((symbol-function 's3-publish--s3cmd-or-error)
+             (lambda (&rest _)
+               "http://bkt.host/k.txt?AWSAccessKeyId=A&Expires=1&Signature=x%3D\n")))
+    (should (equal (s3-publish--signed-url test-s3-publish--profile "k.txt" 60)
+                   "https://bkt.host/k.txt?AWSAccessKeyId=A&Expires=1&Signature=x%3D"))))
+
+(ert-deftest s3-publish-test-private-profile-hands-out-s3-uri ()
+  "A private profile without an expiry hands out the s3:// URI."
+  (test-s3-publish-with-fake-s3
+    (let ((s3-publish-profiles
+           (list (plist-put (copy-sequence test-s3-publish--profile)
+                            :public-acl nil))))
+      (with-temp-buffer
+        (insert "secret")
+        (should (string-prefix-p "s3://bkt/" (s3-publish-buffer)))))))
+
+(ert-deftest s3-publish-test-private-profile-hands-out-signed-urls ()
+  "With an expiry, a private document and the links in it are signed."
+  (test-s3-publish-with-fake-s3
+    (let ((s3-publish-profiles
+           (list (plist-put (copy-sequence test-s3-publish--profile)
+                            :public-acl nil)))
+          (s3-publish-signed-url-expiry "1d"))
+      (test-s3-publish-with-file file "doc.org" "#+TITLE: Doc\n"
+        (with-current-buffer (find-file-noselect file)
+          (unwind-protect
+              (let ((url (s3-publish-org-buffer)))
+                (should (string-match-p "\\`https://.*Expires=\\+86400" url))
+                (should (string-match-p
+                         (regexp-quote
+                          (format "<a href=\"https://bkt.fake-endpoint/%s?Expires=+86400"
+                                  (test-s3-publish--key file)))
+                         (test-s3-publish--object
+                          (test-s3-publish--key file ".html"))))
+                ;; Private uploads are never listed in the public feed.
+                (should-not (test-s3-publish--object "index.xml")))
+            (kill-buffer)))))))
+
 (provide 'test-s3-publish-network)
