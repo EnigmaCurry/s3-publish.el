@@ -1679,4 +1679,33 @@ by, failing the publish."
     (should (= 0 (mod seconds 86400)))
     (should (<= (+ (float-time) 604800) seconds (+ (float-time) 604800 86400)))))
 
+(ert-deftest s3-publish-test-remove-buffer-honours-document-name ()
+  "Removing a named Markdown document's buffer removes it by its name.
+`s3-publish-remove-buffer' used to delete the hashed key, which did not
+exist, and report success, leaving the named page and source behind."
+  (test-s3-publish-with-fake-s3
+    (test-s3-publish-with-file md "doc.md" "---\ntitle: T\ns3_publish_key: named-doc\n---\nHi\n"
+      (s3-publish-api-publish md "test")
+      (should (test-s3-publish--object "named-doc.html"))
+      (with-current-buffer (find-file-noselect md)
+        (unwind-protect (s3-publish-remove-buffer)
+          (kill-buffer)))
+      (should-not (test-s3-publish--object "named-doc.html"))
+      (should-not (test-s3-publish--object "named-doc.md"))
+      (should-not (string-match-p "<item>" (test-s3-publish--object "index.xml"))))))
+
+(ert-deftest s3-publish-test-remove-file-takes-whole-document ()
+  "Removing an unnamed Org file removes its page as well as its source."
+  (test-s3-publish-with-fake-s3
+    (test-s3-publish-with-file org "doc.org" "#+TITLE: T\n"
+      (s3-publish-api-publish org "test")
+      (s3-publish-remove-file org)
+      (should-not (test-s3-publish--object (test-s3-publish--key org ".html")))
+      (should-not (test-s3-publish--object (test-s3-publish--key org))))
+    ;; A plain file is still removed as itself.
+    (test-s3-publish-with-file txt "a.txt" "a"
+      (s3-publish-api-publish txt "test")
+      (s3-publish-remove-file txt)
+      (should-not (test-s3-publish--object (test-s3-publish--key txt))))))
+
 (provide 'test-s3-publish-network)

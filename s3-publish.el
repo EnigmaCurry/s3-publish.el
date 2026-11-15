@@ -3835,7 +3835,18 @@ PROFILE is a plist that must include :bucket, :endpoint, :salt,
 and credentials (:access-key and :secret-key).
 FILE's key is generated using `s3-publish-get-file-key' with PROFILE's
 salt.  The RSS feed and HTML index entries are dropped too.
+
+An Org or Markdown file is published as a document -- an HTML page and
+its source, perhaps under a name of its own (`#+S3_PUBLISH_KEY:') -- so
+it is removed as one, with `s3-publish--remove-document-internal'.
 Returns the S3 URI if successful, or signals an error."
+  (if (s3-publish--document-file-p file)
+      (s3-publish--remove-document-internal file profile)
+    (s3-publish--remove-plain-file file profile)))
+
+(defun s3-publish--remove-plain-file (file profile)
+  "Remove FILE, published as itself, from S3 using PROFILE.
+See `s3-publish--remove-file-internal'."
   (let* ((key (s3-publish-get-file-key file (plist-get profile :salt)))
          (s3-uri (format "s3://%s/%s" (plist-get profile :bucket) key)))
     (s3-publish--delete-key profile key)
