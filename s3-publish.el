@@ -342,6 +342,30 @@ Removing files is always done in the foreground."
 (defvar s3-publish--running nil
   "The process of the background job running now, or nil.")
 
+(defvar s3-publish--job-counter 0
+  "The number of the last job started by `s3-publish--run'.")
+
+(defvar s3-publish--finished nil
+  "Jobs that have finished, newest first, as plists.
+Each has the job's :job number, :label, :status (`done', `failed' or
+`superseded'), :error for a failure, :superseded-by for a job replaced
+by a newer one, and :time.  Only the latest
+`s3-publish--finished-limit' are kept.")
+
+(defvar s3-publish--finished-limit 100
+  "How many finished jobs `s3-publish--finished' remembers.")
+
+(defun s3-publish--record (job status &rest properties)
+  "Remember that JOB finished with STATUS, plus PROPERTIES."
+  (push (append (list :job (plist-get job :job)
+                      :label (plist-get job :label)
+                      :status status)
+                properties
+                (list :time (format-time-string "%F %T")))
+        s3-publish--finished)
+  (when (> (length s3-publish--finished) s3-publish--finished-limit)
+    (setcdr (nthcdr (1- s3-publish--finished-limit) s3-publish--finished) nil)))
+
 (defconst s3-publish--result-marker "\n@@s3-publish-result@@ "
   "Printed by a background job before its result.")
 
@@ -356,13 +380,23 @@ identifies what the job publishes: a waiting job with the same ID is
 replaced by this one.  CLEANUP lists files to delete once the job is
 done, whether or not it succeeded.  ARGS must print readably.
 
+Every job gets a number, left in `s3-publish--job-counter', by which
+`s3-publish-api-status' reports on it.
+
 In the foreground, returns FUNCTION's value.  In the background, returns
 nil straight away."
-  (if (not s3-publish-async)
-      (unwind-protect (apply function args)
-        (mapc #'s3-publish--delete-if-exists cleanup))
-    (let ((job (list :label label :id id :function function :args args
-                     :cleanup cleanup)))
+  (let ((job (list :job (setq s3-publish--job-counter (1+ s3-publish--job-counter))
+                   :label label :id id :function function :args args
+                   :cleanup cleanup)))
+    (if (not s3-publish-async)
+        (unwind-protect
+            (condition-case err
+                (prog1 (apply function args)
+                  (s3-publish--record job 'done))
+              (error
+               (s3-publish--record job 'failed :error (error-message-string err))
+               (signal (car err) (cdr err))))
+          (mapc #'s3-publish--delete-if-exists cleanup))
       (setq s3-publish--queue
             (append (seq-remove
                      (lambda (queued)
@@ -370,20 +404,30 @@ nil straight away."
                          (mapc #'s3-publish--delete-if-exists
                                (cl-set-difference (plist-get queued :cleanup)
                                                   cleanup :test #'equal))
+                         (s3-publish--record queued 'superseded
+                                             :superseded-by (plist-get job :job))
                          t))
                      s3-publish--queue)
-                    (list job))))
-    (s3-publish--start-next)
-    nil))
+                    (list job)))
+      (s3-publish--start-next)
+      nil)))
 
 (defun s3-publish--delete-if-exists (file)
-  "Delete FILE if it exists."
+  "Delete FILE if it exists.  A directory is deleted with its contents."
   (when (and file (file-exists-p file))
-    (delete-file file)))
+    (if (file-directory-p file)
+        (delete-directory file t)
+      (delete-file file))))
+
+(defvar s3-publish--quiet nil
+  "Non-nil to publish without touching the kill ring.
+Bound by the programmatic API, whose caller is not the person at the
+keyboard.")
 
 (defun s3-publish--announce (url)
   "Copy URL to the kill ring, and say whether it is published or on its way."
-  (kill-new url)
+  (unless s3-publish--quiet
+    (kill-new url))
   (if s3-publish-async
       (message "Publishing in the background (URL copied): %s" url)
     (message "%s" url))
@@ -428,6 +472,7 @@ nil straight away."
          (s3-publish--delete-if-exists job-file)
          (mapc #'s3-publish--delete-if-exists (plist-get job :cleanup))
          (kill-buffer buffer)
+         (s3-publish--record job 'failed :error (error-message-string err))
          (message "s3-publish: could not start upload of %s: %s"
                   (plist-get job :label) (error-message-string err))
          (s3-publish--start-next))))))
@@ -463,6 +508,9 @@ nil straight away."
                                 (if failure "FAILED" "done")
                                 label)
                         (string-trim output) "\n")))
+            (if failure
+                (s3-publish--record job 'failed :error failure)
+              (s3-publish--record job 'done))
             (if failure
                 (progn
                   (display-warning 's3-publish
@@ -1881,7 +1929,8 @@ Returns the resulting URL (see `s3-publish--object-url')."
   (s3-publish--put profile file key mime-type t)
   (s3-publish--object-url profile key))
 
-(defun s3-publish--publish-document (source-file export-fn title description source-label)
+(defun s3-publish--publish-document (source-file export-fn title description source-label
+                                                 &optional temporary)
   "Publish SOURCE-FILE and an HTML rendering of it to S3.
 
 SOURCE-FILE is backed up under its own extension.  EXPORT-FN is called
@@ -1891,6 +1940,8 @@ only in extension.  A link back to the source, labelled SOURCE-LABEL, is
 appended to the bottom of the HTML, and local images are dealt with as
 `s3-publish-html-local-images' says.  TITLE and DESCRIPTION feed the RSS
 feed and HTML index, where both files appear as a single entry.
+TEMPORARY says the exported HTML is a temporary file, to delete once it
+is uploaded, along with the temporary directory it was exported in.
 
 Returns the HTML URL, which is also copied to the kill ring."
   (let* ((profile (s3-publish--select-profile))
@@ -1936,8 +1987,18 @@ Returns the HTML URL, which is also copied to the kill ring."
                            (list html-file html-key "text/html")))
              html-url title
              (format "%s<p>View: <a href=\"%s\">HTML</a> | <a href=\"%s\">%s</a></p>"
-                     description html-url source-url source-label))))
+                     description html-url source-url source-label))
+       (and temporary (s3-publish--temporary-export-files html-file))))
     (s3-publish--announce html-url)))
+
+(defun s3-publish--temporary-export-files (html-file)
+  "Return what to delete once the temporary HTML-FILE is uploaded.
+That is HTML-FILE, and the directory it is in when that is one made by
+`s3-publish--org-string-export-to-html'."
+  (let ((dir (directory-file-name (file-name-directory html-file))))
+    (if (string-prefix-p "s3-publish-export-" (file-name-nondirectory dir))
+        (list dir)
+      (list html-file))))
 
 (defun s3-publish--transfer-document (profile uploads url title description)
   "Upload a document's files to PROFILE's bucket, then list it.
@@ -2864,7 +2925,7 @@ to a published Org buffer."
       (s3-publish--publish-document
        md-file
        (lambda () (s3-publish--org-string-export-to-html org-text))
-       title description "Markdown source"))))
+       title description "Markdown source" t))))
 
 
 ;;; Removal of published documents --------------------------------------------
@@ -3413,11 +3474,13 @@ unescaped and need not be well-formed XML."
                     items))))))
     (nreverse items)))
 
-(defun s3-publish--bucket-objects (profile)
-  "List every object in PROFILE's bucket, as plists of :key, :date, :size."
+(defun s3-publish--bucket-objects (profile &optional prefix)
+  "List the objects in PROFILE's bucket, as plists of :key, :date, :size.
+With PREFIX, only those whose key starts with it."
   (let ((output (s3-publish--s3cmd-or-error
                  profile "Listing the bucket" "ls" "--recursive"
-                 (format "s3://%s" (plist-get profile :bucket))))
+                 (format "s3://%s/%s" (plist-get profile :bucket)
+                         (or prefix ""))))
         (objects nil))
     (dolist (line (split-string output "\n" t))
       (when (string-match
@@ -4158,6 +4221,252 @@ If user cancels, returns the original profile with regular credentials."
 
         ;; User selected default credentials
         (s3-publish-get-credentials profile)))))
+
+
+;;; Programmatic API -----------------------------------------------------------
+;; For driving s3-publish from outside, e.g. `emacsclient --eval' run by a
+;; script or an agent.  These functions never prompt, take the profile by
+;; name, never read, save or otherwise touch a buffer the user has open --
+;; a file is published as it is on disk, from a buffer of its own -- and
+;; leave the kill ring alone.  They return plain data.
+
+(defconst s3-publish--document-extensions
+  '("org" "md" "markdown" "mdown" "mkd" "mkdn")
+  "Extensions of files published as documents: an HTML page plus source.")
+
+(defun s3-publish--document-file-p (file)
+  "Return non-nil when FILE is published as a document, by its extension."
+  (member (downcase (or (file-name-extension file) ""))
+          s3-publish--document-extensions))
+
+(defun s3-publish--api-profile (profile-name)
+  "Return the profile named PROFILE-NAME, with credentials.
+There is deliberately no default: a caller unsure which profile to use
+should ask, not guess.  See `s3-publish-api-profiles'."
+  (unless (and (stringp profile-name) (not (string-empty-p profile-name)))
+    (error "A profile name is required; see `s3-publish-api-profiles'"))
+  (s3-publish-get-credentials (s3-publish-get-profile profile-name)))
+
+(defun s3-publish-api-profiles ()
+  "Return the s3-publish profiles, as plists.
+Each has :name, :bucket, :endpoint, :public (whether files are public),
+:feed (whether it keeps an RSS feed and HTML index) and :last-used (the
+profile last chosen at a profile prompt, a hint and never a default).
+Credentials are not included."
+  (let ((default (s3-publish--default-profile-name (s3-publish--profile-names))))
+    (mapcar (lambda (profile)
+              (list :name (plist-get profile :name)
+                    :bucket (plist-get profile :bucket)
+                    :endpoint (plist-get profile :endpoint)
+                    :public (and (plist-get profile :public-acl) t)
+                    :feed (and (plist-get profile :rss-feed) t)
+                    :last-used (equal (plist-get profile :name) default)))
+            s3-publish-profiles)))
+
+(defun s3-publish--file-keyword (text keyword)
+  "Return the value of the Org KEYWORD in TEXT, or nil."
+  (let ((case-fold-search t))
+    (when (string-match (format "^[ \t]*#\\+%s:[ \t]*\\(.*?\\)[ \t]*$" keyword) text)
+      (match-string 1 text))))
+
+(defun s3-publish--org-file-export-to-html (file)
+  "Export the Org FILE to a temporary HTML file and return its name.
+The export runs in a buffer of its own, holding the file as it is on
+disk, so a buffer visiting FILE is neither read nor touched.  Relative
+links resolve against FILE's directory, as they would from FILE itself."
+  (let ((buffer (generate-new-buffer " *s3-publish-api*"))
+        (html (make-temp-file "s3-publish-api-" nil ".html")))
+    (unwind-protect
+        (with-current-buffer buffer
+          (insert-file-contents file)
+          (setq default-directory (file-name-directory file))
+          ;; Visiting FILE, Org would title the page after it; this buffer
+          ;; is visiting nothing, so say so.
+          (unless (s3-publish--file-keyword (buffer-string) "TITLE")
+            (goto-char (point-min))
+            (insert "#+TITLE: " (file-name-base file) "\n"))
+          ;; The user's Org hooks are for their own buffers.
+          (delay-mode-hooks (org-mode))
+          (let ((org-export-in-background nil))
+            (s3-publish--call-with-html-export-settings
+             (lambda () (org-export-to-file 'html html))))
+          (s3-publish--rewrite-toc-heading html)
+          (s3-publish--move-postamble-into-content html))
+      (kill-buffer buffer))))
+
+(defun s3-publish--api-result (url keys)
+  "Return the result of an API publish of URL as KEYS."
+  (let ((job s3-publish--job-counter))
+    (append (list :url url :keys keys :job job)
+            (s3-publish-api-status job))))
+
+(defun s3-publish-api-publish (file profile-name &optional title)
+  "Publish FILE with the profile named PROFILE-NAME, without prompting.
+
+FILE must be an absolute path.  An Org or Markdown file is published as
+a document: an HTML page, which is the URL returned, plus the source
+beside it.  Any other file is published as itself.  The URL depends only
+on FILE's path and the profile, so publishing the same path again
+replaces what was there.  TITLE overrides the title in the RSS feed and
+HTML index.
+
+What is published is FILE as it is on disk: a buffer visiting it is not
+saved or read.  Org files are never tangled.
+
+Returns a plist: :url, :keys (every object written), :job and :status.
+With `s3-publish-async' on the upload is still running or queued when
+this returns; poll `s3-publish-api-status' with the :job number until
+its :status is `done' or `failed'."
+  (unless (file-name-absolute-p file)
+    (error "Not an absolute file name: %s" file))
+  (setq file (expand-file-name file))
+  (unless (file-regular-p file)
+    (error "No such file: %s" file))
+  (let* ((profile (s3-publish--api-profile profile-name))
+         (s3-publish--profile-override (plist-get profile :name))
+         (s3-publish--quiet t)
+         (key (s3-publish-get-file-key file (plist-get profile :salt)))
+         (stamp (format "Published on %s" (format-time-string "%Y-%m-%d %H:%M"))))
+    (if (not (s3-publish--document-file-p file))
+        (let ((url (s3-publish--shareable-url profile key)))
+          (s3-publish--run url (format "%s/%s" (plist-get profile :bucket) key)
+                           's3-publish-upload-file
+                           (list file profile
+                                 (or title (file-name-nondirectory file))
+                                 stamp))
+          (s3-publish--api-result url (list key)))
+      (let* ((text (with-temp-buffer
+                     (insert-file-contents file)
+                     (buffer-string)))
+             (org-p (equal (downcase (file-name-extension file)) "org"))
+             (org-text (if org-p text (s3-publish--markdown-to-org-string text)))
+             (url (s3-publish--publish-document
+                   file
+                   (if org-p
+                       (lambda () (s3-publish--org-file-export-to-html file))
+                     (lambda () (s3-publish--org-string-export-to-html org-text)))
+                   (or title
+                       (s3-publish--file-keyword org-text "TITLE")
+                       (file-name-nondirectory file))
+                   (or (s3-publish--file-keyword org-text "DESCRIPTION") stamp)
+                   (if org-p "Org source" "Markdown source")
+                   t)))
+        (s3-publish--api-result
+         url (list (concat (file-name-sans-extension key) ".html") key))))))
+
+(defun s3-publish-api-status (&optional job)
+  "Report on background uploads.
+
+With JOB, a number from `s3-publish-api-publish', return a plist with
+its :job, :label and :status: `queued', `running', `done', `failed' (with
+:error), `superseded' (replaced by a newer upload of the same file,
+:superseded-by) or `unknown'.
+
+Without JOB, return :running (the job uploading now, or nil), :queued
+(the jobs waiting) and :recent (the last ten to finish)."
+  (cl-flet ((summary (job) (list :job (plist-get job :job)
+                                 :label (plist-get job :label))))
+    (let ((running (and s3-publish--running
+                        (process-get s3-publish--running 's3-publish-job))))
+      (if (not job)
+          (list :running (and running (summary running))
+                :queued (mapcar #'summary s3-publish--queue)
+                :recent (seq-take s3-publish--finished 10))
+        (cond
+         ((and running (equal (plist-get running :job) job))
+          (append (summary running) (list :status 'running)))
+         ((seq-find (lambda (queued) (equal (plist-get queued :job) job))
+                    s3-publish--queue)
+          (append (summary (seq-find (lambda (queued)
+                                       (equal (plist-get queued :job) job))
+                                     s3-publish--queue))
+                  (list :status 'queued)))
+         ((seq-find (lambda (done) (equal (plist-get done :job) job))
+                    s3-publish--finished))
+         (t (list :job job :status 'unknown)))))))
+
+(defun s3-publish-api-list (profile-name &optional bucket)
+  "List what has been published with PROFILE-NAME, newest first.
+
+A profile with an RSS feed is listed from the feed, unless BUCKET is
+non-nil: plists of :title, :url, :key and :date.  Otherwise the bucket
+itself is listed, every object in it, feed and index included: plists
+of :key, :url, :size (bytes) and :date.  For a private bucket :url is
+the s3:// URI."
+  (let ((profile (s3-publish--api-profile profile-name)))
+    (if (and (plist-get profile :rss-feed) (not bucket))
+        (let ((feed (s3-publish--get profile s3-publish-rss-filename)))
+          (mapcar (lambda (item)
+                    (list :title (plist-get item :title)
+                          :url (plist-get item :link)
+                          :key (ignore-errors
+                                 (s3-publish--url-key profile (plist-get item :link)))
+                          :date (s3-publish-list--date (plist-get item :date))))
+                  (s3-publish-list--newest-first
+                   (and feed (s3-publish--feed-items feed)))))
+      (mapcar (lambda (object)
+                (list :key (plist-get object :key)
+                      :url (s3-publish--object-url profile (plist-get object :key))
+                      :size (plist-get object :size)
+                      :date (s3-publish-list--date (plist-get object :date))))
+              (s3-publish-list--newest-first
+               (s3-publish--bucket-objects profile))))))
+
+(defun s3-publish-api-delete (target profile-name)
+  "Delete what TARGET was published as, with PROFILE-NAME.
+
+TARGET is a URL, an s3:// URI, or the absolute path of a file that was
+published.  Every object sharing the target's key -- for a document,
+both the HTML page and its source -- is deleted, along with its entry
+in the RSS feed and HTML index.  Images uploaded beside a page are kept,
+since other pages may use them.  Always runs in the foreground.
+
+Returns the list of keys deleted.  Deleting what does not exist is not
+an error; it returns nil."
+  (let* ((profile (s3-publish--api-profile profile-name))
+         (key (cond
+               ((string-match-p "\\`[a-zA-Z][a-zA-Z0-9+.-]*://" target)
+                (s3-publish--url-key profile target))
+               ((file-name-absolute-p target)
+                (s3-publish-get-file-key (expand-file-name target)
+                                         (plist-get profile :salt)))
+               (t (error "Not a URL or an absolute file name: %s" target))))
+         (base (file-name-sans-extension key))
+         (keys (sort (delete-dups
+                      (mapcar (lambda (object) (plist-get object :key))
+                              (seq-filter
+                               (lambda (object)
+                                 (equal (file-name-sans-extension
+                                         (plist-get object :key))
+                                        base))
+                               (s3-publish--bucket-objects profile base))))
+                     #'string<))
+         (listed (or (seq-find (lambda (k) (string-suffix-p ".html" k)) keys)
+                     key)))
+    (when keys
+      (when (and (plist-get profile :rss-feed) (plist-get profile :public-acl))
+        (s3-publish-remove-from-feed profile (s3-publish--object-url profile listed)))
+      (dolist (k keys)
+        (s3-publish--delete-key profile k)))
+    keys))
+
+(defun s3-publish-api-sign (target duration profile-name)
+  "Return a signed URL for TARGET that works for DURATION.
+TARGET is a URL, an s3:// URI, a key, or the absolute path of a
+published file (whose HTML page is signed, for a document).  DURATION
+is a number of seconds or e.g. \"12h\" or \"7d\"."
+  (let* ((profile (s3-publish--api-profile profile-name))
+         (key (cond
+               ((string-match-p "\\`[a-zA-Z][a-zA-Z0-9+.-]*://" target)
+                (s3-publish--url-key profile target))
+               ((file-name-absolute-p target)
+                (let ((key (s3-publish-get-file-key (expand-file-name target)
+                                                    (plist-get profile :salt))))
+                  (if (s3-publish--document-file-p target)
+                      (concat (file-name-sans-extension key) ".html")
+                    key)))
+               (t target))))
+    (s3-publish--signed-url profile key (s3-publish--parse-duration duration))))
 
 
 (provide 's3-publish)

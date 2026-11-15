@@ -3,6 +3,11 @@
 (require 'ert)
 (require 's3-publish)
 
+(defun test-s3-publish--delete-export (html-file)
+  "Delete HTML-FILE, exported to a temporary directory, with the directory."
+  (mapc #'s3-publish--delete-if-exists
+        (s3-publish--temporary-export-files html-file)))
+
 (defun test-s3-publish--org (markdown)
   "Convert MARKDOWN and return its body, without the header or anchor drawers.
 Heading anchors are covered separately; stripping the `:PROPERTIES:'
@@ -263,7 +268,7 @@ otherwise renders the title again and lists it twice in the contents."
       (should (string-match-p "background: #121212" html))
       ;; Org's minimal default stylesheet is replaced, not layered under ours.
       (should-not (string-match-p "#content { max-width: 60em" html))
-      (delete-file html-file)))
+      (test-s3-publish--delete-export html-file)))
 
 (ert-deftest s3-publish-test-theme-off-restores-org-default ()
   "A nil theme leaves Org's own export settings, and stylesheet, in place."
@@ -272,7 +277,7 @@ otherwise renders the title again and lists it twice in the contents."
          (html (with-temp-buffer (insert-file-contents html-file) (buffer-string))))
     (should (string-match-p "#content { max-width: 60em" html))
     (should-not (string-match-p "background: #121212" html))
-    (delete-file html-file)))
+    (test-s3-publish--delete-export html-file)))
 
 (ert-deftest s3-publish-test-theme-from-css-file ()
   "A theme naming a readable file is inlined from that file."
@@ -285,7 +290,7 @@ otherwise renders the title again and lists it twice in the contents."
                        (insert-file-contents html-file)
                        (buffer-string))))
           (should (string-match-p "body { color: fuchsia; }" html))
-          (delete-file html-file))
+          (test-s3-publish--delete-export html-file))
       (delete-file css-file))))
 
 (ert-deftest s3-publish-test-theme-from-css-string ()
@@ -294,7 +299,7 @@ otherwise renders the title again and lists it twice in the contents."
          (html-file (s3-publish--org-string-export-to-html "* Section\n"))
          (html (with-temp-buffer (insert-file-contents html-file) (buffer-string))))
     (should (string-match-p "body { color: teal; }" html))
-    (delete-file html-file)))
+    (test-s3-publish--delete-export html-file)))
 
 (ert-deftest s3-publish-test-document-head-overrides-theme ()
   "A document's own HTML_HEAD still wins over the configured theme."
@@ -304,7 +309,7 @@ otherwise renders the title again and lists it twice in the contents."
          (html (with-temp-buffer (insert-file-contents html-file) (buffer-string))))
     (should (string-match-p "body { color: olive; }" html))
     (should-not (string-match-p "background: #121212" html))
-    (delete-file html-file)))
+    (test-s3-publish--delete-export html-file)))
 
 (ert-deftest s3-publish-test-markdown-buffer-p ()
   "Markdown buffers are recognised by mode or by file extension."
@@ -334,7 +339,7 @@ otherwise renders the title again and lists it twice in the contents."
 Scoped to the body so the embedded stylesheet cannot satisfy a match."
   (let* ((file (s3-publish--org-string-export-to-html org-text))
          (html (with-temp-buffer (insert-file-contents file) (buffer-string))))
-    (delete-file file)
+    (test-s3-publish--delete-export file)
     (substring html (string-match "<body>" html))))
 
 (ert-deftest s3-publish-test-headings-link-to-themselves ()
@@ -500,7 +505,7 @@ Org's generated ids are content hashes that change between exports."
   (let* ((html-file (s3-publish--org-string-export-to-html
                      "#+begin_src bash\necho hi\n#+end_src\n"))
          (html (with-temp-buffer (insert-file-contents html-file) (buffer-string))))
-    (delete-file html-file)
+    (test-s3-publish--delete-export html-file)
     html))
 
 (ert-deftest s3-publish-test-src-block-advice-ignored ()
@@ -552,7 +557,7 @@ Org's generated ids are content hashes that change between exports."
   (let* ((html-file (s3-publish--org-string-export-to-html
                      "#+HTML_HEAD: <style>body { color: olive; }</style>\n* Section\n"))
          (html (with-temp-buffer (insert-file-contents html-file) (buffer-string))))
-    (delete-file html-file)
+    (test-s3-publish--delete-export html-file)
     (should (string-match-p test-s3-publish--copy-script html))))
 
 (ert-deftest s3-publish-test-copy-button-keeps-user-scripts ()
@@ -577,7 +582,7 @@ Org's generated ids are content hashes that change between exports."
   (let ((body (test-s3-publish--export-body "#+TITLE: T\n* One\n"))
         (head (let* ((f (s3-publish--org-string-export-to-html "#+TITLE: T\n* One\n"))
                      (h (with-temp-buffer (insert-file-contents f) (buffer-string))))
-                (delete-file f)
+                (test-s3-publish--delete-export f)
                 h)))
     (ignore body)
     (should (string-match-p
@@ -588,7 +593,7 @@ Org's generated ids are content hashes that change between exports."
   (let* ((s3-publish-html-favicon nil)
          (f (s3-publish--org-string-export-to-html "#+TITLE: T\n* One\n"))
          (html (with-temp-buffer (insert-file-contents f) (buffer-string))))
-    (delete-file f)
+    (test-s3-publish--delete-export f)
     (should-not (string-match-p "rel=\"icon\"" html))))
 
 (ert-deftest s3-publish-test-favicon-from-file ()
@@ -598,7 +603,7 @@ Org's generated ids are content hashes that change between exports."
         (let* ((s3-publish-html-favicon png)
                (f (s3-publish--org-string-export-to-html "#+TITLE: T\n* One\n"))
                (html (with-temp-buffer (insert-file-contents f) (buffer-string))))
-          (delete-file f)
+          (test-s3-publish--delete-export f)
           (should (string-match-p "href=\"data:image/png;base64," html))
           ;; The data URI must be one line, or the href breaks.
           (should (string-match-p "href=\"data:image/png;base64,[A-Za-z0-9+/=]+\"" html)))
@@ -624,7 +629,7 @@ Org's generated ids are content hashes that change between exports."
   (let* ((s3-publish-html-theme nil)
          (f (s3-publish--org-string-export-to-html "#+TITLE: T\n* One\n"))
          (html (with-temp-buffer (insert-file-contents f) (buffer-string))))
-    (delete-file f)
+    (test-s3-publish--delete-export f)
     (should (string-match-p "rel=\"icon\"" html))
     ;; Theme off, so Org's own stylesheet is back.
     (should (string-match-p "#content { max-width: 60em" html))))

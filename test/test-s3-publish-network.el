@@ -708,4 +708,180 @@ an error, since saving must not prompt."
       (should (equal (format-time-string "%F %H:%M" (plist-get (car objects) :date))
                      "2026-11-14 22:00")))))
 
+;;; Programmatic API
+
+(ert-deftest s3-publish-test-api-profiles ()
+  "Profiles are listed without credentials, the last used marked."
+  (test-s3-publish-with-fake-s3
+    (let ((s3-publish-profile-history '("test")))
+      (should (equal (s3-publish-api-profiles)
+                     '((:name "test" :bucket "bkt" :endpoint "fake-endpoint"
+                              :public t :feed t :last-used t)))))))
+
+(ert-deftest s3-publish-test-api-needs-a-profile-and-a-real-file ()
+  "No profile, a relative path or a missing file is an error, not a guess."
+  (test-s3-publish-with-fake-s3
+    (test-s3-publish-with-file file "a.txt" "a"
+      (should-error (s3-publish-api-publish file nil))
+      (should-error (s3-publish-api-publish file ""))
+      (should-error (s3-publish-api-publish "a.txt" "test"))
+      (should-error (s3-publish-api-publish (concat file ".gone") "test"))
+      (should-error (s3-publish-api-list nil))
+      (should-not (test-s3-publish--log)))))
+
+(ert-deftest s3-publish-test-api-publish-leaves-user-buffers-alone ()
+  "Publishing reads the file from disk, not a modified buffer visiting it."
+  (test-s3-publish-with-fake-s3
+    (test-s3-publish-with-file file "doc.org" "#+TITLE: Disk\n\nOn disk.\n"
+      (let ((visiting (find-file-noselect file)))
+        (unwind-protect
+            (with-current-buffer visiting
+              (goto-char (point-max))
+              (insert "Unsaved edit.\n")
+              (let* ((buffers (buffer-list))
+                     (result (s3-publish-api-publish file "test")))
+                (should (equal (plist-get result :keys)
+                               (list (test-s3-publish--key file ".html")
+                                     (test-s3-publish--key file))))
+                (should (equal (plist-get result :url)
+                               (concat "https://bkt.fake-endpoint/"
+                                       (test-s3-publish--key file ".html"))))
+                (should (eq (plist-get result :status) 'done))
+                (let ((html (test-s3-publish--object
+                             (test-s3-publish--key file ".html"))))
+                  (should (string-match-p "On disk" html))
+                  (should-not (string-match-p "Unsaved" html))
+                  (should (string-match-p "<title>Disk</title>" html)))
+                ;; The visiting buffer is still modified, still unsaved.
+                (should (buffer-modified-p))
+                (should (string-match-p "Unsaved" (buffer-string)))
+                (should (equal (with-temp-buffer (insert-file-contents file)
+                                                 (buffer-string))
+                               "#+TITLE: Disk\n\nOn disk.\n"))
+                ;; No buffers left behind, and the kill ring untouched.
+                (should (equal (seq-filter #'buffer-live-p buffers)
+                               (seq-filter #'buffer-live-p (buffer-list))))
+                (should-not kill-ring)))
+          (with-current-buffer visiting (set-buffer-modified-p nil))
+          (kill-buffer visiting))))))
+
+(ert-deftest s3-publish-test-api-org-title-defaults-to-file-name ()
+  "An Org file without a title is titled after the file, as Org would."
+  (test-s3-publish-with-fake-s3
+    (test-s3-publish-with-file file "my-notes.org" "Just text.\n"
+      (s3-publish-api-publish file "test")
+      (should (string-match-p "<title>my-notes</title>"
+                              (test-s3-publish--object
+                               (test-s3-publish--key file ".html")))))))
+
+(ert-deftest s3-publish-test-api-markdown-and-plain-files ()
+  "Markdown publishes as a document, other files as themselves."
+  (test-s3-publish-with-fake-s3
+    (test-s3-publish-with-file md "doc.md" "# Title\n\nBody.\n"
+      (let ((result (s3-publish-api-publish md "test")))
+        (should (= 2 (length (plist-get result :keys))))
+        (should (string-match-p "<title>Title</title>"
+                                (test-s3-publish--object
+                                 (test-s3-publish--key md ".html"))))))
+    (test-s3-publish-with-file txt "a.txt" "plain"
+      (let ((result (s3-publish-api-publish txt "test" "Custom title")))
+        (should (equal (plist-get result :keys) (list (test-s3-publish--key txt))))
+        (should (equal (test-s3-publish--object (test-s3-publish--key txt)) "plain"))
+        (should (string-match-p "<title>Custom title</title>"
+                                (test-s3-publish--object "index.xml")))))))
+
+(ert-deftest s3-publish-test-api-async-status ()
+  "A background publish reports its job, which can be polled until done."
+  (test-s3-publish-with-fake-s3
+    (test-s3-publish-async
+      (test-s3-publish-with-file file "a.txt" "a"
+        (let* ((result (s3-publish-api-publish file "test"))
+               (job (plist-get result :job)))
+          (should (memq (plist-get result :status) '(running queued)))
+          (should (equal (plist-get (plist-get (s3-publish-api-status) :running) :job)
+                         job))
+          (should (s3-publish--wait 30))
+          (should (eq (plist-get (s3-publish-api-status job) :status) 'done))
+          (should (eq (plist-get (s3-publish-api-status 99999) :status) 'unknown)))))))
+
+(ert-deftest s3-publish-test-api-async-failure-and-superseded ()
+  "Failures carry their error; a replaced waiting job says what replaced it."
+  (test-s3-publish-with-fake-s3
+    (test-s3-publish-async
+      (cl-letf (((symbol-function 'display-warning) #'ignore))
+        (let ((process-environment (cons "FAKE_S3_FAIL=1" process-environment)))
+          (test-s3-publish-with-file a "a.txt" "a"
+            (test-s3-publish-with-file b "b.txt" "b"
+              (let* ((first (plist-get (s3-publish-api-publish a "test") :job))
+                     (old (plist-get (s3-publish-api-publish b "test") :job))
+                     (new (plist-get (s3-publish-api-publish b "test") :job)))
+                (should (eq (plist-get (s3-publish-api-status old) :status)
+                            'superseded))
+                (should (equal (plist-get (s3-publish-api-status old) :superseded-by)
+                               new))
+                (should (s3-publish--wait 30))
+                (let ((status (s3-publish-api-status first)))
+                  (should (eq (plist-get status :status) 'failed))
+                  (should (string-match-p "simulated failure"
+                                          (plist-get status :error))))))))))))
+
+(ert-deftest s3-publish-test-api-list ()
+  "Listing gives the feed's entries, or the bucket's objects."
+  (test-s3-publish-with-fake-s3
+    (test-s3-publish-with-file file "doc.org" "#+TITLE: Doc\n"
+      (s3-publish-api-publish file "test")
+      (let ((feed (s3-publish-api-list "test")))
+        (should (= 1 (length feed)))
+        (should (equal (plist-get (car feed) :title) "Doc"))
+        (should (equal (plist-get (car feed) :key) (test-s3-publish--key file ".html"))))
+      (should (equal (sort (mapcar (lambda (o) (plist-get o :key))
+                                   (s3-publish-api-list "test" t))
+                           #'string<)
+                     (sort (list (test-s3-publish--key file ".html")
+                                 (test-s3-publish--key file)
+                                 "index.html" "index.xml")
+                           #'string<))))))
+
+(ert-deftest s3-publish-test-api-delete-document-by-url-path-or-source ()
+  "Deleting a document by any of its names removes page, source and entry."
+  (test-s3-publish-with-fake-s3
+    (test-s3-publish-with-file file "doc.org" "#+TITLE: Doc\n"
+      (let ((both (list (test-s3-publish--key file ".html")
+                        (test-s3-publish--key file))))
+        (dolist (target (list (lambda (r) (plist-get r :url))
+                              (lambda (_) file)
+                              (lambda (_) (concat "s3://bkt/"
+                                                  (test-s3-publish--key file)))))
+          (let ((result (s3-publish-api-publish file "test")))
+            (should (equal (sort (s3-publish-api-delete (funcall target result) "test")
+                                 #'string<)
+                           (sort (copy-sequence both) #'string<)))
+            (dolist (key both)
+              (should-not (test-s3-publish--object key)))
+            (should-not (string-match-p "<item>"
+                                        (test-s3-publish--object "index.xml")))))
+        ;; Nothing left to delete is not an error.
+        (should-not (s3-publish-api-delete file "test"))))))
+
+(ert-deftest s3-publish-test-api-delete-plain-file-keeps-others ()
+  "Deleting a plain file deletes only it."
+  (test-s3-publish-with-fake-s3
+    (test-s3-publish-with-file a "a.txt" "a"
+      (test-s3-publish-with-file b "b.txt" "b"
+        (s3-publish-api-publish a "test")
+        (s3-publish-api-publish b "test")
+        (should (equal (s3-publish-api-delete a "test")
+                       (list (test-s3-publish--key a))))
+        (should (test-s3-publish--object (test-s3-publish--key b)))))))
+
+(ert-deftest s3-publish-test-api-sign ()
+  "Signing a document's path signs its HTML page."
+  (test-s3-publish-with-fake-s3
+    (test-s3-publish-with-file file "doc.org" "x"
+      (should (string-match-p
+               (regexp-quote (concat (test-s3-publish--key file ".html")
+                                     "?Expires=+3600"))
+               (s3-publish-api-sign file "1h" "test")))
+      (should-not kill-ring))))
+
 (provide 'test-s3-publish-network)
