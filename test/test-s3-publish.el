@@ -643,3 +643,164 @@ the contents sidebar rather than under the text it belongs to."
     (should (string-match-p "Author:" body))))
 
 (provide 'test-s3-publish)
+
+
+;;; Tangling before publishing
+
+(defun test-s3-publish--with-org-file (content fn)
+  "Visit a temporary Org file holding CONTENT and call FN in its buffer.
+FN receives the temporary directory, where relative tangle paths land."
+  (let* ((dir (make-temp-file "s3-publish-tangle-" t))
+         (file (expand-file-name "doc.org" dir))
+         (buffer nil))
+    (unwind-protect
+        (progn
+          (with-temp-file file (insert content))
+          (setq buffer (find-file-noselect file))
+          (with-current-buffer buffer (funcall fn dir)))
+      (when (buffer-live-p buffer)
+        (with-current-buffer buffer (set-buffer-modified-p nil))
+        (kill-buffer buffer))
+      (delete-directory dir t))))
+
+(defconst test-s3-publish--tangled-doc
+  "#+TITLE: Tangled\n\n#+begin_src text :tangle out.txt\nhello\n#+end_src\n"
+  "An Org document with one block to tangle into out.txt.")
+
+(defmacro test-s3-publish--counting-prompts (answer &rest body)
+  "Run BODY answering every `y-or-n-p' with ANSWER.
+Returns the number of times BODY was asked."
+  (declare (indent 1))
+  `(let ((asked 0))
+     (cl-letf (((symbol-function 'y-or-n-p)
+                (lambda (&rest _) (setq asked (1+ asked)) ,answer)))
+       ,@body)
+     asked))
+
+(ert-deftest s3-publish-test-tangle-off-by-default ()
+  "With the default setting nothing is tangled and nothing is asked."
+  (should (null (default-value 's3-publish-org-tangle)))
+  (test-s3-publish--with-org-file
+   test-s3-publish--tangled-doc
+   (lambda (dir)
+     (let ((s3-publish-org-tangle nil))
+       (should (= 0 (test-s3-publish--counting-prompts t
+                      (should-not (s3-publish--org-maybe-tangle)))))
+       (should-not (file-exists-p (expand-file-name "out.txt" dir)))))))
+
+(ert-deftest s3-publish-test-tangle-keyword-errors-when-off ()
+  "A document asking to be tangled is an error when tangling is off.
+Publishing it anyway would run its code against stale files."
+  (test-s3-publish--with-org-file
+   (concat "#+S3_PUBLISH_TANGLE: t\n" test-s3-publish--tangled-doc)
+   (lambda (dir)
+     (let ((s3-publish-org-tangle nil))
+       (should-error (s3-publish--org-maybe-tangle) :type 'user-error)
+       (should-not (file-exists-p (expand-file-name "out.txt" dir)))))))
+
+(ert-deftest s3-publish-test-tangle-keyword-nil-is-fine-when-off ()
+  "A document opting out of tangling is no error when tangling is off."
+  (test-s3-publish--with-org-file
+   (concat "#+S3_PUBLISH_TANGLE: nil\n" test-s3-publish--tangled-doc)
+   (lambda (_dir)
+     (let ((s3-publish-org-tangle nil))
+       (should-not (s3-publish--org-maybe-tangle))))))
+
+(ert-deftest s3-publish-test-tangle-asks-and-tangles-on-yes ()
+  "With `ask', answering yes tangles the document."
+  (test-s3-publish--with-org-file
+   test-s3-publish--tangled-doc
+   (lambda (dir)
+     (let ((s3-publish-org-tangle 'ask))
+       (should (= 1 (test-s3-publish--counting-prompts t
+                      (should (s3-publish--org-maybe-tangle)))))
+       (should (equal (with-temp-buffer
+                        (insert-file-contents (expand-file-name "out.txt" dir))
+                        (buffer-string))
+                      "hello\n"))))))
+
+(ert-deftest s3-publish-test-tangle-asks-and-skips-on-no ()
+  "With `ask', answering no leaves the tangled files alone."
+  (test-s3-publish--with-org-file
+   test-s3-publish--tangled-doc
+   (lambda (dir)
+     (let ((s3-publish-org-tangle 'ask))
+       (should (= 1 (test-s3-publish--counting-prompts nil
+                      (should-not (s3-publish--org-maybe-tangle)))))
+       (should-not (file-exists-p (expand-file-name "out.txt" dir)))))))
+
+(ert-deftest s3-publish-test-tangle-keyword-t-still-asks ()
+  "A document asking to be tangled is still asked about; nothing is implicit."
+  (test-s3-publish--with-org-file
+   (concat "#+S3_PUBLISH_TANGLE: t\n" test-s3-publish--tangled-doc)
+   (lambda (dir)
+     (let ((s3-publish-org-tangle 'ask))
+       (should (= 1 (test-s3-publish--counting-prompts nil
+                      (should-not (s3-publish--org-maybe-tangle)))))
+       (should-not (file-exists-p (expand-file-name "out.txt" dir)))))))
+
+(ert-deftest s3-publish-test-tangle-keyword-nil-skips-the-question ()
+  "A document opting out of tangling is not asked about."
+  (test-s3-publish--with-org-file
+   (concat "#+S3_PUBLISH_TANGLE: nil\n" test-s3-publish--tangled-doc)
+   (lambda (dir)
+     (let ((s3-publish-org-tangle 'ask))
+       (should (= 0 (test-s3-publish--counting-prompts t
+                      (should-not (s3-publish--org-maybe-tangle)))))
+       (should-not (file-exists-p (expand-file-name "out.txt" dir)))))))
+
+(ert-deftest s3-publish-test-tangle-not-asked-without-tangle-blocks ()
+  "A document with nothing to tangle is not asked about."
+  (test-s3-publish--with-org-file
+   "#+TITLE: Plain\n\n#+begin_src text\nhello\n#+end_src\n\n#+begin_src text :tangle no\nhi\n#+end_src\n"
+   (lambda (_dir)
+     (let ((s3-publish-org-tangle 'ask))
+       (should (= 0 (test-s3-publish--counting-prompts t
+                      (should-not (s3-publish--org-maybe-tangle)))))))))
+
+(ert-deftest s3-publish-test-tangle-blocks-found-through-properties ()
+  "A `:tangle' set by `#+PROPERTY:' counts as a block to tangle."
+  (test-s3-publish--with-org-file
+   "#+PROPERTY: header-args :tangle out.txt\n\n#+begin_src text\nhello\n#+end_src\n"
+   (lambda (_dir)
+     (should (s3-publish--org-has-tangle-blocks-p)))))
+
+(ert-deftest s3-publish-test-tangle-keyword-values ()
+  "The keyword reads t, nil and their yes/no spellings, and rejects the rest."
+  (dolist (case '(("t" . t) ("T" . t) ("yes" . t) ("nil" . nil) ("no" . nil)))
+    (with-temp-buffer
+      (insert (format "#+S3_PUBLISH_TANGLE: %s\n" (car case)))
+      (should (eq (s3-publish--org-tangle-keyword) (cdr case)))))
+  (with-temp-buffer
+    (insert "* No keyword\n")
+    (should (eq (s3-publish--org-tangle-keyword) 'unset)))
+  (with-temp-buffer
+    (insert "#+S3_PUBLISH_TANGLE: maybe\n")
+    (should-error (s3-publish--org-tangle-keyword) :type 'user-error)))
+
+(ert-deftest s3-publish-test-org-buffer-tangles-before-publishing ()
+  "Publishing an Org buffer tangles it before the export runs."
+  (test-s3-publish--with-org-file
+   test-s3-publish--tangled-doc
+   (lambda (dir)
+     (let ((s3-publish-org-tangle 'ask)
+           (tangled-at-publish 'not-called))
+       (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) t))
+                 ((symbol-function 's3-publish--publish-document)
+                  (lambda (&rest _)
+                    (setq tangled-at-publish
+                          (file-exists-p (expand-file-name "out.txt" dir))))))
+         (s3-publish-org-buffer))
+       (should (eq tangled-at-publish t))))))
+
+(ert-deftest s3-publish-test-org-buffer-refuses-before-uploading ()
+  "A document that needs tangling, with tangling off, is never uploaded."
+  (test-s3-publish--with-org-file
+   (concat "#+S3_PUBLISH_TANGLE: t\n" test-s3-publish--tangled-doc)
+   (lambda (_dir)
+     (let ((s3-publish-org-tangle nil)
+           (published nil))
+       (cl-letf (((symbol-function 's3-publish--publish-document)
+                  (lambda (&rest _) (setq published t))))
+         (should-error (s3-publish-org-buffer) :type 'user-error))
+       (should-not published)))))

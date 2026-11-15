@@ -207,6 +207,32 @@ step:
  * The URL will be printed in the minibuffer and copied to
    =kill-ring=.
 
+**** Tangling before publishing
+
+Literate documents often evaluate code during export that runs the
+files they [[https://orgmode.org/manual/Extracting-Source-Code.html][tangle]]. Exporting without tangling first runs stale or
+missing files. To be asked whether to tangle before each publish, set:
+
+#+begin_src emacs-lisp
+  (setq s3-publish-org-tangle 'ask)
+#+end_src
+
+Tangling overwrites the tangled files, so it is never done without
+asking, and documents with nothing to tangle are not asked about. The
+default, =nil=, never tangles.
+
+A document can declare what it needs:
+
+ * =#+S3_PUBLISH_TANGLE: t= marks a document that must be tangled. It
+   is still asked about, and publishing it is an error while
+   =s3-publish-org-tangle= is =nil=, rather than uploading a page made
+   from stale files.
+ * =#+S3_PUBLISH_TANGLE: nil= is never tangled or asked about.
+
+Only =s3-publish-org-buffer= tangles. Regions and Markdown are
+exported from a temporary copy, where relative tangle paths would
+point at the wrong place.
+
 *** Publish Markdown Buffer
 
 Markdown buffers work exactly the same way, and produce exactly the

@@ -1633,6 +1633,78 @@ the result is styled exactly like any other Org export."
 
 ;;; Org publishing ------------------------------------------------------------
 
+(defcustom s3-publish-org-tangle nil
+  "Whether `s3-publish-org-buffer' tangles the buffer before exporting it.
+
+Literate documents often evaluate code that runs the files they tangle,
+so exporting without tangling first runs stale or missing files.
+Tangling writes those files, overwriting any changes made to them
+directly, so it is off by default.
+
+  nil   Never tangle.  A document asking for it with
+        `#+S3_PUBLISH_TANGLE: t' is an error rather than being
+        published from stale files.
+  ask   Ask before tangling a document that has blocks to tangle.
+
+Tangling always asks first; it never happens implicitly.  A document
+can skip the question with `#+S3_PUBLISH_TANGLE: nil', which is never
+tangled.  `#+S3_PUBLISH_TANGLE: t' marks a document that needs
+tangling: it is still asked about, but is an error when this is nil.
+
+Only `s3-publish-org-buffer' tangles.  Regions and Markdown are exported
+from a temporary copy, where relative tangle paths would point at the
+wrong place."
+  :type '(choice (const :tag "Never" nil)
+                 (const :tag "Ask" ask))
+  :group 's3-publish)
+
+(defun s3-publish--org-tangle-keyword ()
+  "Return the current buffer's `#+S3_PUBLISH_TANGLE:' setting.
+Returns t or nil when the keyword is set, and the symbol `unset' when
+it is absent."
+  (save-excursion
+    (goto-char (point-min))
+    (let ((case-fold-search t))
+      (if (not (re-search-forward
+                "^[ \t]*#\\+S3_PUBLISH_TANGLE:[ \t]*\\(.*?\\)[ \t]*$" nil t))
+          'unset
+        (let ((value (downcase (match-string-no-properties 1))))
+          (cond
+           ((member value '("t" "yes")) t)
+           ((member value '("nil" "no")) nil)
+           (t (user-error "Invalid #+S3_PUBLISH_TANGLE: %S (use t or nil)"
+                          (match-string-no-properties 1)))))))))
+
+(defun s3-publish--org-has-tangle-blocks-p ()
+  "Return non-nil when the current Org buffer has a source block to tangle.
+Header arguments are resolved as Org resolves them, so a `:tangle' set
+through `#+PROPERTY:' or a heading's properties counts."
+  (require 'ob-core)
+  (let (found)
+    (org-babel-map-src-blocks nil
+      (unless found
+        (let ((tangle (cdr (assq :tangle
+                                 (nth 2 (org-babel-get-src-block-info 'no-eval))))))
+          (when (and tangle (not (equal tangle "no")))
+            (setq found t)))))
+    found))
+
+(defun s3-publish--org-maybe-tangle ()
+  "Tangle the current Org buffer if `s3-publish-org-tangle' says to.
+See that variable for how it combines with `#+S3_PUBLISH_TANGLE:'.
+Returns non-nil when the buffer was tangled."
+  (let ((document (s3-publish--org-tangle-keyword)))
+    (when (and (eq document t) (null s3-publish-org-tangle))
+      (user-error "This document sets #+S3_PUBLISH_TANGLE: t, \
+but `s3-publish-org-tangle' is nil"))
+    (when (and s3-publish-org-tangle
+               document
+               (s3-publish--org-has-tangle-blocks-p)
+               (y-or-n-p "Tangle this document before publishing? "))
+      (require 'ob-tangle)
+      (org-babel-tangle)
+      t)))
+
 (defun s3-publish-org-buffer ()
   "Export the current Org buffer to HTML and upload it to S3.
 Before exporting, save the buffer and back up the original .org file to S3.
@@ -1640,13 +1712,15 @@ Both files share the same key (computed from the org file and profile salt)
 with only their extensions differing.
 A link to the .org file is appended to the bottom of the HTML file.
 Only the HTML file URL is displayed and copied to the kill ring.
-When updating the RSS feed, both files are grouped as a single entry."
+When updating the RSS feed, both files are grouped as a single entry.
+The buffer is tangled first when `s3-publish-org-tangle' says to."
   (interactive)
   (when (and (buffer-file-name) (buffer-modified-p))
     (save-buffer))
   (let ((org-file (buffer-file-name)))
     (unless org-file
       (error "Current org buffer is not visiting a file"))
+    (s3-publish--org-maybe-tangle)
     (let ((title (or (save-excursion
                        (goto-char (point-min))
                        (and (re-search-forward "^#\\+TITLE:\\s-*\\(.*\\)$" nil t)
