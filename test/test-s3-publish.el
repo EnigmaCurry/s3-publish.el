@@ -1016,8 +1016,12 @@ Returns (DEFAULT . RESULT): what the prompt started on and what it returned."
     (should (string-match-p (regexp-quote entry) new))
     (should (equal (s3-publish--index-entries new)
                    (s3-publish--index-entries old)))
-    ;; Restyling is idempotent.
-    (should (equal (s3-publish--restyle-html-index test-s3-publish--profile new)
-                   new))))
+    ;; Restyling is idempotent, but for the date it was restyled on.
+    (cl-letf (((symbol-function 'format-time-string)
+               (lambda (&rest _) "2026-01-01 00:00:00 UTC")))
+      (let ((once (s3-publish--restyle-html-index test-s3-publish--profile old)))
+        (should (string-match-p "Last Modified: 2026-01-01 00:00:00 UTC" once))
+        (should (equal (s3-publish--restyle-html-index test-s3-publish--profile once)
+                       once))))))
 
 (provide 'test-s3-publish)
