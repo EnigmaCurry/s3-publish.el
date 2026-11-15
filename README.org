@@ -742,6 +742,36 @@ machine s3-publish-admin login ADMIN_ACCESS_KEY secret ADMIN_SECRET_KEY
 When performing administrative operations, s3-publish will give you
 the option to select an alternative credential from your auth source.
 
+** Publishing from scripts and agents
+
+The =s3-publish-api-*= functions drive s3-publish from outside Emacs,
+e.g. through =emacsclient --eval=. They never prompt, take the profile
+by name, leave the kill ring alone, and publish a file as it is on
+disk without touching any buffer you have open:
+
+| Function                 | Does                                              |
+|--------------------------+---------------------------------------------------|
+| =s3-publish-api-profiles= | List the profiles (no credentials)               |
+| =s3-publish-api-publish=  | Publish a file; returns its URL, keys and job    |
+| =s3-publish-api-status=   | Report on background uploads                     |
+| =s3-publish-api-list=     | List the feed, or every object in the bucket     |
+| =s3-publish-api-delete=   | Delete by URL or path, both halves of a document |
+| =s3-publish-api-sign=     | Make a signed URL that expires                   |
+
+*** Claude Code skill
+
+=claude-skill/s3-publish/= is a [[https://docs.claude.com/en/docs/claude-code/skills][Claude Code skill]] built on this API, so
+Claude can publish, list and delete files through your running Emacs.
+It asks you which profile to use when that is not clear, and before
+deleting anything. Install it by linking it into your skills directory:
+
+#+begin_src shell
+  ln -s "$PWD/claude-skill/s3-publish" ~/.claude/skills/s3-publish
+#+end_src
+
+Your Emacs needs a running server (=M-x server-start=) with this version
+of s3-publish loaded. =claude-skill/s3-publish/s3p check= tests both.
+
 ** License
 
 This software is distributed under the 0BSD license:

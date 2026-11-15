@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+# s3p — drive s3-publish.el in the user's running Emacs, through emacsclient.
+#
+# Every command prints the Lisp value Emacs returns (plists).  Nothing here
+# prompts, opens a user buffer, or touches the kill ring; see the
+# s3-publish-api-* functions in s3-publish.el.
+set -euo pipefail
+
+usage() {
+    cat <<'EOF'
+usage: s3p COMMAND [ARGS]
+
+  check                         Is Emacs reachable, with the s3-publish API loaded?
+  profiles                      List profiles (name, bucket, public, feed, last-used)
+  publish FILE PROFILE [TITLE]  Publish FILE (Org/Markdown -> HTML page + source)
+  status [JOB]                  Status of one upload job, or of all of them
+  wait JOB [SECONDS]            Poll JOB until done/failed (default 120s); exit 1 on failure
+  list PROFILE [--bucket]       List published files (feed), or every object in the bucket
+  delete TARGET PROFILE         Delete a URL, s3:// URI or published file path (all its keys)
+  sign TARGET DURATION PROFILE  Signed URL for TARGET valid for DURATION (e.g. 1h, 7d)
+EOF
+}
+
+# Quote a shell string as an Emacs Lisp string literal.
+lisp_string() {
+    local s=${1//\\/\\\\}
+    s=${s//\"/\\\"}
+    printf '"%s"' "$s"
+}
+
+# S3P_SOCKET names a non-default Emacs server socket (emacsclient -s).
+ec=(emacsclient)
+[ -n "${S3P_SOCKET:-}" ] && ec+=(-s "$S3P_SOCKET")
+
+ev() {
+    "${ec[@]}" --eval "$1"
+}
+
+need_api() {
+    if ! out=$("${ec[@]}" --eval "(and (fboundp 's3-publish-api-publish) t)" 2>&1); then
+        echo "s3p: cannot reach Emacs with emacsclient: $out" >&2
+        exit 2
+    fi
+    if [ "$out" != "t" ]; then
+        echo "s3p: the running Emacs has no s3-publish API (s3-publish-api-publish);" \
+             "load a version of s3-publish.el that has it" >&2
+        exit 2
+    fi
+}
+
+[ $# -ge 1 ] || { usage >&2; exit 2; }
+cmd=$1; shift
+
+case "$cmd" in
+    -h|--help|help) usage ;;
+    check)
+        need_api
+        echo "ok"
+        ;;
+    profiles)
+        need_api
+        ev "(s3-publish-api-profiles)"
+        ;;
+    publish)
+        [ $# -ge 2 ] || { usage >&2; exit 2; }
+        need_api
+        file=$(realpath -e -- "$1")
+        title=nil
+        [ $# -ge 3 ] && title=$(lisp_string "$3")
+        ev "(s3-publish-api-publish $(lisp_string "$file") $(lisp_string "$2") $title)"
+        ;;
+    status)
+        need_api
+        if [ $# -ge 1 ]; then
+            [[ $1 =~ ^[0-9]+$ ]] || { echo "s3p: JOB must be a number" >&2; exit 2; }
+            ev "(s3-publish-api-status $1)"
+        else
+            ev "(s3-publish-api-status)"
+        fi
+        ;;
+    wait)
+        [ $# -ge 1 ] && [[ $1 =~ ^[0-9]+$ ]] || { usage >&2; exit 2; }
+        need_api
+        job=$1; limit=${2:-120}; start=$SECONDS
+        # Poll from out here, a second apart, so Emacs stays free between.
+        # emacsclient wraps long values over lines, so ask for the bare
+        # status symbol rather than matching inside the printed plist.
+        while :; do
+            status=$(ev "(plist-get (s3-publish-api-status $job) :status)")
+            case "$status" in
+                done) ev "(s3-publish-api-status $job)"; exit 0 ;;
+                failed|unknown) ev "(s3-publish-api-status $job)"; exit 1 ;;
+                superseded) ev "(s3-publish-api-status $job)"; exit 3 ;;
+            esac
+            if (( SECONDS - start >= limit )); then
+                ev "(s3-publish-api-status $job)"
+                echo "s3p: still not finished after ${limit}s" >&2
+                exit 4
+            fi
+            sleep 1
+        done
+        ;;
+    list)
+        [ $# -ge 1 ] || { usage >&2; exit 2; }
+        need_api
+        bucket=nil
+        [ "${2:-}" = "--bucket" ] && bucket=t
+        ev "(s3-publish-api-list $(lisp_string "$1") $bucket)"
+        ;;
+    delete)
+        [ $# -eq 2 ] || { usage >&2; exit 2; }
+        need_api
+        target=$1
+        # A path that exists is made absolute; URLs and absolute paths pass.
+        if [[ ! $target =~ ^[a-zA-Z][a-zA-Z0-9+.-]*:// ]] && [[ $target != /* ]]; then
+            target=$(realpath -m -- "$target")
+        fi
+        ev "(s3-publish-api-delete $(lisp_string "$target") $(lisp_string "$2"))"
+        ;;
+    sign)
+        [ $# -eq 3 ] || { usage >&2; exit 2; }
+        need_api
+        target=$1
+        if [[ ! $target =~ ^[a-zA-Z][a-zA-Z0-9+.-]*:// ]] && [[ $target != /* ]] \
+               && [ -e "$target" ]; then
+            target=$(realpath -- "$target")
+        fi
+        ev "(s3-publish-api-sign $(lisp_string "$target") $(lisp_string "$2") $(lisp_string "$3"))"
+        ;;
+    *)
+        echo "s3p: unknown command: $cmd" >&2
+        usage >&2
+        exit 2
+        ;;
+esac
