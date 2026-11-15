@@ -1,5 +1,7 @@
 #+title: Publish to S3 from Emacs
 
+#+html: <p align="center"><img src="images/s3-publish-logo.png" alt="s3-publish.el logo" width="300"></p>
+
 This is an Emacs package that quickly publishes any buffer, region, or
 file to S3 and the web (AWS S3, DigitalOcean spaces, etc.).
 
