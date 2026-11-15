@@ -75,7 +75,7 @@ A plist becomes an object, any other list an array, a symbol a string."
     (terpri)))
 
 (defun s3p--usage ()
-  (error "Usage: s3p profiles | publish FILE PROFILE [--title T] [--run-code] \
+  (error "Usage: s3p profiles | publish FILE PROFILE [--title T] [--name N] [--run-code] \
 | list PROFILE [--bucket] | delete TARGET PROFILE | sign TARGET DURATION PROFILE"))
 
 (defun s3p--run (command args)
@@ -89,18 +89,19 @@ A plist becomes an object, any other list an array, a symbol a string."
            :profiles (length s3-publish-profiles)))
     ("profiles" (vconcat (s3-publish-api-profiles)))
     ("publish"
-     (let ((file nil) (profile nil) (title nil) (run-code nil))
+     (let ((file nil) (profile nil) (title nil) (run-code nil) (name nil))
        (while args
          (let ((arg (pop args)))
            (pcase arg
              ("--title" (setq title (or (pop args) (s3p--usage))))
+             ("--name" (setq name (or (pop args) (s3p--usage))))
              ("--run-code" (setq run-code t))
              (_ (cond ((null file) (setq file arg))
                       ((null profile) (setq profile arg))
                       (t (s3p--usage)))))))
        (unless (and file profile) (s3p--usage))
        (let ((result (s3-publish-api-publish (expand-file-name file) profile
-                                             title run-code)))
+                                             title run-code name)))
          (unless (eq (plist-get result :status) 'done)
            (error "%s" (or (plist-get result :error) "Upload did not complete")))
          (list :url (plist-get result :url) :keys (plist-get result :keys)
@@ -118,7 +119,8 @@ A plist becomes an object, any other list an array, a symbol a string."
 
 (defun s3p-main ()
   "Entry point: run the command in `command-line-args-left' and exit."
-  (let ((args command-line-args-left))
+  (let ((args (mapcar (lambda (arg) (string-remove-prefix "s3p:" arg))
+                      command-line-args-left)))
     (setq command-line-args-left nil)
     (condition-case err
         (progn

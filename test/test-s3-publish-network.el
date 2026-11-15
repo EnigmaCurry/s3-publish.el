@@ -1383,4 +1383,121 @@ republished one: a lazy regexp matched across item boundaries."
           (insert "x")
           (should-error (s3-publish-buffer) :type 'user-error))))))
 
+;;; Chosen names
+
+(ert-deftest s3-publish-test-check-name ()
+  "Names are plain URL-safe paths."
+  (dolist (good '("my-post" "my_post.v2" "notes/my-post" "a/b/c.html" "2026-11-15"))
+    (should (equal (s3-publish--check-name good) good)))
+  (dolist (bad '("" "my post" "/abs" "a//b" "a/" "../up" "./here" "a/../b"
+                 "café" "a?b" "a#b" ".hidden"))
+    (should-error (s3-publish--check-name bad) :type 'user-error)))
+
+(ert-deftest s3-publish-test-document-source-key ()
+  "A document's name sets its key, with or without .html; otherwise the hash."
+  (let ((profile test-s3-publish--profile))
+    (should (equal (s3-publish--document-source-key
+                    "/x/doc.org" profile "#+TITLE: T\n#+S3_PUBLISH_KEY: my-post\n")
+                   "my-post.org"))
+    (should (equal (s3-publish--document-source-key
+                    "/x/doc.org" profile "#+S3_PUBLISH_KEY: my-post.html\n")
+                   "my-post.org"))
+    (should (equal (s3-publish--document-source-key
+                    "/x/doc.md" profile "---\ns3_publish_key: notes/my-post\n---\nHi\n")
+                   "notes/my-post.md"))
+    (should (equal (s3-publish--document-source-key "/x/doc.org" profile "Hi\n")
+                   (s3-publish-get-file-key "/x/doc.org" "salt")))
+    ;; The feed's own index is not a name a document can take...
+    (should-error (s3-publish--document-source-key
+                   "/x/doc.org" profile "#+S3_PUBLISH_KEY: index\n")
+                  :type 'user-error)
+    ;; ...unless the profile keeps no index.
+    (should (equal (s3-publish--document-source-key
+                    "/x/doc.org" (plist-put (copy-sequence profile) :rss-feed nil)
+                    "#+S3_PUBLISH_KEY: index.html\n")
+                   "index.org"))))
+
+(ert-deftest s3-publish-test-named-org-document-lifecycle ()
+  "A named Org document publishes, signs, edits and removes by its name."
+  (test-s3-publish-with-fake-s3
+    (test-s3-publish-with-file org "doc.org"
+        "#+TITLE: Named\n#+S3_PUBLISH_KEY: notes/my-post\n\nHello.\n"
+      (with-current-buffer (find-file-noselect org)
+        (unwind-protect
+            (progn
+              (should (equal (s3-publish-org-buffer)
+                             "https://bkt.fake-endpoint/notes/my-post.html"))
+              (should (string-match-p "Hello" (test-s3-publish--object "notes/my-post.html")))
+              (should (string-match-p "Hello" (test-s3-publish--object "notes/my-post.org")))
+              ;; The page links its source by name too.
+              (should (string-match-p "notes/my-post\\.org\">View Org source"
+                                      (test-s3-publish--object "notes/my-post.html")))
+              (should-not (test-s3-publish--object (test-s3-publish--key org ".html")))
+              (should (string-match-p "<link>https://bkt.fake-endpoint/notes/my-post.html</link>"
+                                      (test-s3-publish--object "index.xml")))
+              ;; Signing defaults to the named page.
+              (should (equal (s3-publish--buffer-key test-s3-publish--profile)
+                             "notes/my-post.html")))
+          (kill-buffer)))
+      ;; A live edit keeps the name.
+      (test-s3-publish-editing buffer "notes/my-post.html"
+        (test-s3-publish--edit-and-save
+         "#+TITLE: Named\n#+S3_PUBLISH_KEY: notes/my-post\n\nEdited.\n")
+        (should (string-match-p "Edited" (test-s3-publish--object "notes/my-post.html"))))
+      ;; Removing the document by its file finds it by name.
+      (s3-publish--remove-document-internal
+       org (s3-publish-get-credentials test-s3-publish--profile))
+      (should-not (test-s3-publish--object "notes/my-post.html"))
+      (should-not (test-s3-publish--object "notes/my-post.org"))
+      (should-not (string-match-p "<item>" (test-s3-publish--object "index.xml"))))))
+
+(ert-deftest s3-publish-test-named-markdown-via-api ()
+  "Markdown front matter names a document; the API deletes it by path."
+  (test-s3-publish-with-fake-s3
+    (test-s3-publish-with-file md "doc.md" "---\ntitle: T\ns3_publish_key: hello\n---\nHi\n"
+      (let ((result (s3-publish-api-publish md "test")))
+        (should (equal (plist-get result :url) "https://bkt.fake-endpoint/hello.html"))
+        (should (equal (plist-get result :keys) '("hello.html" "hello.md"))))
+      (should (equal (s3-publish-api-delete md "test") '("hello.html" "hello.md")))
+      (should (string-match-p "hello\\.html\\?Expires"
+                              (s3-publish-api-sign md "1h" "test"))))))
+
+(ert-deftest s3-publish-test-api-name-argument ()
+  "The API's NAME names any file; a plain file keeps its extension."
+  (test-s3-publish-with-fake-s3
+    (test-s3-publish-with-file txt "notes.txt" "plain"
+      (should (equal (plist-get (s3-publish-api-publish txt "test" nil nil "report") :url)
+                     "https://bkt.fake-endpoint/report.txt"))
+      (should (equal (test-s3-publish--object "report.txt") "plain"))
+      (should (equal (plist-get (s3-publish-api-publish txt "test" nil nil "r2.txt") :keys)
+                     '("r2.txt"))))
+    (test-s3-publish-with-file org "doc.org" "#+S3_PUBLISH_KEY: from-keyword\n"
+      ;; The argument wins over the document's own keyword.
+      (should (equal (plist-get (s3-publish-api-publish org "test" nil nil "from-arg") :keys)
+                     '("from-arg.html" "from-arg.org"))))))
+
+(ert-deftest s3-publish-test-invalid-name-uploads-nothing ()
+  "A bad name is refused before anything is exported or uploaded."
+  (test-s3-publish-with-fake-s3
+    (test-s3-publish-with-file org "doc.org" "#+S3_PUBLISH_KEY: my post\n"
+      (should-error (s3-publish-api-publish org "test") :type 'user-error)
+      (with-current-buffer (find-file-noselect org)
+        (unwind-protect (should-error (s3-publish-org-buffer) :type 'user-error)
+          (kill-buffer)))
+      (should-not (test-s3-publish--log)))))
+
+(ert-deftest s3-publish-test-s3p-name-option ()
+  "The skill's --name publishes under the chosen name."
+  (test-s3-publish-with-fake-s3
+    (test-s3-publish-with-s3p-home
+      (test-s3-publish-with-file file "doc.org" "#+TITLE: T\n"
+        (let ((result (test-s3-publish--s3p "publish" file "test" "--name" "chosen"
+                                            "--title" "Given title")))
+          (should (= 0 (car result)))
+          (should (equal (alist-get 'url (cdr result))
+                         "https://bkt.fake-endpoint/chosen.html")))
+        ;; --name and --title are also Emacs options; they must reach s3p.
+        (should (string-match-p "<title>Given title</title>"
+                                (test-s3-publish--object "index.xml")))))))
+
 (provide 'test-s3-publish-network)

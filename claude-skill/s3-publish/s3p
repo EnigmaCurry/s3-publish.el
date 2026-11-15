@@ -12,8 +12,10 @@ usage: s3p COMMAND [ARGS]
 
   check                                   Settings, library and s3cmd found?
   profiles                                List profiles (name, bucket, public, feed, last-used)
-  publish FILE PROFILE [--title T] [--run-code]
+  publish FILE PROFILE [--title T] [--name N] [--run-code]
                                           Publish FILE; Org/Markdown -> HTML page + source.
+                                          --name publishes under N (N.html for a document)
+                                          instead of a hashed key.
                                           --run-code tangles and evaluates Org code blocks.
   list PROFILE [--bucket]                 Published files (feed), or every object in the bucket
   delete TARGET PROFILE                   Delete a URL, s3:// URI or file path (all its keys)
@@ -71,7 +73,10 @@ fi
 log=$(mktemp -t s3p-log.XXXXXX)
 trap 'rm -f "$log"' EXIT
 status=0
-emacs --batch -Q "${load_path[@]}" -l "$here/s3p.el" -f s3p-main "${args[@]}" \
+# Emacs reads options such as --name and --title wherever they appear on
+# its command line, so every argument is passed with a prefix that no
+# option has, which s3p-main strips.
+emacs --batch -Q "${load_path[@]}" -l "$here/s3p.el" -f s3p-main "${args[@]/#/s3p:}" \
       2>"$log" </dev/null || status=$?
 if [ $status -ne 0 ]; then
     tail -20 "$log" >&2

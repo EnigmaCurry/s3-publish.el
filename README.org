@@ -576,6 +576,33 @@ it will keep the same key/URL. However, there are two exceptions:
 Both of these create temporary files with random names in order to
 export them. Therefore these will always make new S3 keys.
 
+** Choosing a document's URL
+
+A document is normally published under a key hashed from its path. To
+choose the name yourself, set it in the document -- in Org with a
+keyword, in Markdown in its front matter:
+
+#+begin_src org
+  ,#+S3_PUBLISH_KEY: notes/my-post
+#+end_src
+
+#+begin_src markdown
+  ---
+  s3_publish_key: notes/my-post
+  ---
+#+end_src
+
+The page is then published as =notes/my-post.html= and its source as
+=notes/my-post.org= (or =.md=); writing =my-post.html= means the same.
+Removing, signing, live editing and republishing all follow the name.
+A name is letters, digits, =.=, =_= and =-=, with =/= between parts.
+
+A name is yours to choose, so it is not checked against what is
+already in the bucket: two documents with one name replace each other.
+Naming a document that was already published moves it; the objects
+under its old, hashed key stay until you remove them (do that first,
+with =C-u M-x s3-publish=).
+
 ** Background uploads
 
 Uploading, and updating the RSS feed and HTML index, happen in the

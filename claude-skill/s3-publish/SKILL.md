@@ -28,6 +28,17 @@ stdout. A failure exits non-zero with `{"error": "..."}`.
     with the same profile.
   - Put new content at a new path unless the user wants it replaced, and
     keep published files where they will stay.
+- **Or a chosen name.** A document naming itself with
+  `#+S3_PUBLISH_KEY: my-post` (Org) or `s3_publish_key: my-post`
+  (Markdown front matter) is published as `my-post.html` (+ its source,
+  `my-post.org`/`.md`) instead. `s3p publish --name my-post` does the
+  same for any file (a plain file keeps its extension). Names are
+  letters, digits, `.`, `_`, `-`, with `/` between parts. **A name is
+  global in the bucket: publishing two things under one name replaces
+  the first** — only use `--name` when the user asks for a name, and
+  check `s3p list PROFILE --bucket` first that it is free. Renaming a
+  published document moves it; the old hashed objects stay until
+  deleted.
 - **Org (`.org`) and Markdown (`.md`, `.markdown`, ...) are documents:**
   they publish **two objects** with one base key — the HTML page
   (`BASE.html`, the URL to share) and the source (`BASE.org` / `BASE.md`,
@@ -78,7 +89,7 @@ did not clearly ask for it to be public, confirm before publishing.
 ```
 s3p check                                      # settings, library, s3cmd found?
 s3p profiles
-s3p publish FILE PROFILE [--title T] [--run-code]
+s3p publish FILE PROFILE [--title T] [--name N] [--run-code]
 s3p list PROFILE [--bucket]
 s3p delete TARGET PROFILE                      # TARGET: URL, s3:// URI or file path
 s3p sign TARGET DURATION PROFILE               # DURATION: 3600, 30m, 12h, 7d, 2w

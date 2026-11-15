@@ -2011,30 +2011,82 @@ Signals an error when SECONDS is over `s3-publish-signed-url-max-expiry'."
     ;; part of the signature, so the same URL works over https.
     (concat "https" (substring (match-string 0 output) (length (match-string 1 output))))))
 
+(defun s3-publish--document-setting (text keyword key)
+  "Return the value of a setting in the document TEXT, or nil.
+In Org that is the KEYWORD keyword, `#+KEYWORD: value'; in Markdown the
+KEY entry of the YAML front matter opening the document, `KEY: value',
+optionally quoted.  An empty value counts as none."
+  (let* ((case-fold-search t)
+         (value
+          (or (and (string-match
+                    (format "^[ \t]*#\\+%s:[ \t]*\\(.*?\\)[ \t]*$" (regexp-quote keyword))
+                    text)
+                   (match-string 1 text))
+              ;; Only in front matter: a --- block opening the document.
+              (and (string-match
+                    "\\`---[ \t]*\n\\(\\(?:.*\n\\)*?\\)\\(?:---\\|\\.\\.\\.\\)[ \t]*$"
+                    text)
+                   (let ((front (match-string 1 text)))
+                     (and (string-match
+                           (format "^%s:[ \t]*[\"']?\\([^\"'\n]*?\\)[\"']?[ \t]*$"
+                                   (regexp-quote key))
+                           front)
+                          (match-string 1 front)))))))
+    (and value (not (string-empty-p value)) value)))
+
 (defun s3-publish--document-link-expiry (text)
   "Return the link expiry the document TEXT asks for, or `default'.
 TEXT is Org, with a `#+S3_PUBLISH_LINK_EXPIRY:' keyword, or Markdown,
 with `s3_publish_link_expiry:' in its front matter.  The value is a
 duration, checked against `s3-publish-signed-url-max-expiry', or nil
 for nil or none: hand out s3:// URIs.  `default' when TEXT sets none."
-  (let* ((case-fold-search t)
-         (value
-          (or (and (string-match
-                    "^[ \t]*#\\+S3_PUBLISH_LINK_EXPIRY:[ \t]*\\(.*?\\)[ \t]*$" text)
-                   (match-string 1 text))
-              ;; Only in front matter: a --- block opening the document.
-              (and (string-match "\\`---[ \t]*\n\\(\\(?:.*\n\\)*?\\)\\(?:---\\|\\.\\.\\.\\)[ \t]*$"
-                                 text)
-                   (let ((front (match-string 1 text)))
-                     (and (string-match
-                           "^s3_publish_link_expiry:[ \t]*[\"']?\\([^\"'\n]*?\\)[\"']?[ \t]*$"
-                           front)
-                          (match-string 1 front)))))))
+  (let ((value (s3-publish--document-setting
+                text "S3_PUBLISH_LINK_EXPIRY" "s3_publish_link_expiry")))
     (cond
      ((null value) 'default)
      ((member (downcase value) '("nil" "none")) nil)
      (t (s3-publish--check-link-expiry value "S3_PUBLISH_LINK_EXPIRY")
         value))))
+
+(defun s3-publish--check-name (name)
+  "Return NAME if it is usable as a key, or signal an error.
+A name is letters, digits, `.', `_' and `-', in segments separated by
+`/', so its URL needs no escaping."
+  (unless (string-match-p
+           "\\`[A-Za-z0-9_][A-Za-z0-9._-]*\\(?:/[A-Za-z0-9_][A-Za-z0-9._-]*\\)*\\'"
+           name)
+    (user-error "Invalid S3_PUBLISH_KEY %S: use letters, digits, `.', `_' and `-', \
+with `/' between parts" name))
+  name)
+
+(defun s3-publish--document-source-key (file profile &optional text)
+  "Return the key the document FILE's source is published under in PROFILE.
+A document named by `#+S3_PUBLISH_KEY:' (Org) or `s3_publish_key:'
+(Markdown front matter) is published under that name: NAME.html for its
+page, NAME plus the source's extension for the source.  A name ending
+in .html means the same.  Otherwise the key is derived from FILE's path
+and the profile's salt, as for any file.  TEXT is the document, read
+from FILE when not given."
+  (let* ((text (or text
+                   (and (file-readable-p file)
+                        (with-temp-buffer
+                          (insert-file-contents file)
+                          (buffer-string)))
+                   ""))
+         (name (s3-publish--document-setting text "S3_PUBLISH_KEY" "s3_publish_key")))
+    (if (not name)
+        (s3-publish-get-file-key file (plist-get profile :salt))
+      (let ((base (string-remove-suffix ".html" (s3-publish--check-name name))))
+        (when (and (plist-get profile :rss-feed) (equal base "index"))
+          (user-error "S3_PUBLISH_KEY %s would replace the profile's HTML index" name))
+        (concat base (or (file-name-extension file t) ""))))))
+
+(defun s3-publish--named-file-key (file name)
+  "Return the key for publishing the plain FILE as NAME.
+NAME gets FILE's extension, unless it already ends with it."
+  (let ((ext (or (file-name-extension file t) "")))
+    (s3-publish--check-name name)
+    (if (string-suffix-p ext name) name (concat name ext))))
 
 (defun s3-publish--with-document-link-expiry (text fn)
   "Call FN with the links it hands out signed as the document TEXT asks.
@@ -2059,11 +2111,13 @@ That is its public URL, or a signed one for a private bucket when
   "Return the key the current buffer's file is published under in PROFILE.
 For an Org or Markdown document that is its HTML page."
   (when buffer-file-name
-    (let ((key (s3-publish-get-file-key buffer-file-name
-                                        (plist-get profile :salt))))
-      (if (or (derived-mode-p 'org-mode) (s3-publish--markdown-buffer-p))
-          (concat (file-name-sans-extension key) ".html")
-        key))))
+    (if (or (derived-mode-p 'org-mode) (s3-publish--markdown-buffer-p))
+        (concat (file-name-sans-extension
+                 (s3-publish--document-source-key
+                  buffer-file-name profile
+                  (buffer-substring-no-properties (point-min) (point-max))))
+                ".html")
+      (s3-publish-get-file-key buffer-file-name (plist-get profile :salt)))))
 
 (defun s3-publish-sign-url (profile-name object duration)
   "Copy a signed URL for OBJECT, which works for DURATION.
@@ -2159,11 +2213,9 @@ is uploaded, along with the temporary directory it was exported in.
 Returns the HTML URL, which is also copied to the kill ring."
   (let* ((profile (s3-publish--select-profile))
          (salt (plist-get profile :salt))
-         (base-key (file-name-sans-extension
-                    (or s3-publish--key-override
-                        (s3-publish-get-file-key source-file salt))))
          (source-key (or s3-publish--key-override
-                         (concat base-key (or (file-name-extension source-file t) ""))))
+                         (s3-publish--document-source-key source-file profile)))
+         (base-key (file-name-sans-extension source-key))
          (html-key (concat base-key ".html"))
          (source-url (s3-publish--shareable-url profile source-key))
          (html-url (s3-publish--shareable-url profile html-key))
@@ -3199,8 +3251,7 @@ With NOERROR, return nil on failure instead of signalling an error."
 Both objects share a key derived from FILE, differing only in extension.
 The RSS feed and HTML index entries are dropped using the HTML URL, since
 that is the URL those listings link to.  Returns the source S3 URI."
-  (let* ((salt (plist-get profile :salt))
-         (source-key (s3-publish-get-file-key file salt))
+  (let* ((source-key (s3-publish--document-source-key file profile))
          (html-key (concat (file-name-sans-extension source-key) ".html"))
          (bucket (plist-get profile :bucket)))
     (s3-publish--delete-key profile source-key)
@@ -4806,7 +4857,7 @@ as they would, just without results."
             (and (plist-get status :error)
                  (list :error (plist-get status :error))))))
 
-(defun s3-publish-api-publish (file profile-name &optional title run-code)
+(defun s3-publish-api-publish (file profile-name &optional title run-code name)
   "Publish FILE with the profile named PROFILE-NAME, without prompting.
 
 FILE must be an absolute path.  An Org or Markdown file is published as
@@ -4815,6 +4866,11 @@ beside it.  Any other file is published as itself.  The URL depends only
 on FILE's path and the profile, so publishing the same path again
 replaces what was there.  TITLE overrides the title in the RSS feed and
 HTML index.
+
+NAME publishes FILE under that name instead of a key derived from its
+path: for a document, NAME.html and the source beside it, as its own
+`#+S3_PUBLISH_KEY:' would; for any other file, NAME with FILE's
+extension added if it lacks it.
 
 What is published is FILE as it is on disk: a buffer visiting it is not
 saved or read.  No code in it is run unless RUN-CODE is non-nil; see
@@ -4834,21 +4890,30 @@ its :status is `done' or `failed'."
   (let* ((profile (s3-publish--api-profile profile-name))
          (s3-publish--profile-override (plist-get profile :name))
          (s3-publish--quiet t)
-         (key (s3-publish-get-file-key file (plist-get profile :salt)))
+         (document (s3-publish--document-file-p file))
+         (text (and document
+                    (with-temp-buffer
+                      (insert-file-contents file)
+                      (buffer-string))))
+         (key (cond
+               ((and name document)
+                (s3-publish--document-source-key
+                 file profile (format "#+S3_PUBLISH_KEY: %s\n" name)))
+               (name (s3-publish--named-file-key file name))
+               (document (s3-publish--document-source-key file profile text))
+               (t (s3-publish-get-file-key file (plist-get profile :salt)))))
+         (s3-publish--key-override (and document key))
          (stamp (format "Published on %s" (format-time-string "%Y-%m-%d %H:%M"))))
-    (if (not (s3-publish--document-file-p file))
+    (if (not document)
         (let ((url (s3-publish--shareable-url profile key)))
           (s3-publish--run url (format "%s/%s" (plist-get profile :bucket) key)
-                           's3-publish-upload-file
-                           (list file profile
+                           's3-publish--upload-file-as
+                           (list file profile key
                                  (or title (file-name-nondirectory file))
                                  stamp))
           (s3-publish--api-result url (list key)))
       (setq s3-publish--uploaded-images nil)
-      (let* ((text (with-temp-buffer
-                     (insert-file-contents file)
-                     (buffer-string)))
-             (org-p (equal (downcase (file-name-extension file)) "org"))
+      (let* ((org-p (equal (downcase (file-name-extension file)) "org"))
              (org-text (if org-p text (s3-publish--markdown-to-org-string text)))
              (url (s3-publish--with-document-link-expiry
                    text
@@ -4869,6 +4934,13 @@ its :status is `done' or `failed'."
         (s3-publish--api-result
          url (list (concat (file-name-sans-extension key) ".html") key)
          s3-publish--uploaded-images)))))
+
+(defun s3-publish--file-key (file profile)
+  "Return the key FILE is published under in PROFILE.
+For a document, its source's key, which honours `#+S3_PUBLISH_KEY:'."
+  (if (s3-publish--document-file-p file)
+      (s3-publish--document-source-key file profile)
+    (s3-publish-get-file-key file (plist-get profile :salt))))
 
 (defun s3-publish-api-status (&optional job)
   "Report on background uploads.
@@ -4944,8 +5016,7 @@ an error; it returns nil."
                ((string-match-p "\\`[a-zA-Z][a-zA-Z0-9+.-]*://" target)
                 (s3-publish--url-key profile target))
                ((file-name-absolute-p target)
-                (s3-publish-get-file-key (expand-file-name target)
-                                         (plist-get profile :salt)))
+                (s3-publish--file-key (expand-file-name target) profile))
                (t (error "Not a URL or an absolute file name: %s" target))))
          (base (file-name-sans-extension key))
          (keys (sort (delete-dups
@@ -4976,8 +5047,7 @@ is a number of seconds or e.g. \"12h\" or \"7d\"."
                ((string-match-p "\\`[a-zA-Z][a-zA-Z0-9+.-]*://" target)
                 (s3-publish--url-key profile target))
                ((file-name-absolute-p target)
-                (let ((key (s3-publish-get-file-key (expand-file-name target)
-                                                    (plist-get profile :salt))))
+                (let ((key (s3-publish--file-key (expand-file-name target) profile)))
                   (if (s3-publish--document-file-p target)
                       (concat (file-name-sans-extension key) ".html")
                     key)))
