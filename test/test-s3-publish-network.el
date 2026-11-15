@@ -254,6 +254,23 @@
         (should (member "--add-header=x-amz-tagging: temp=temp"
                         (test-s3-publish--object-flags key)))))))
 
+(ert-deftest s3-publish-test-api-reports-uploaded-images ()
+  "An API publish reports the images it uploaded, apart from its own keys."
+  (test-s3-publish-with-fake-s3
+    (test-s3-publish-with-file org "doc.org" "#+TITLE: D\n\n[[file:big.png]]\n\n[[file:small.png]]\n"
+      (let ((big (expand-file-name "big.png" (file-name-directory org)))
+            (small (expand-file-name "small.png" (file-name-directory org))))
+        (test-s3-publish--write-png big)
+        (test-s3-publish--write-png small)
+        (let* ((s3-publish-html-inline-image-max-size 10)
+               (result (s3-publish-api-publish org "test")))
+          (should (equal (plist-get result :images)
+                         (list (test-s3-publish--key big)
+                               (test-s3-publish--key small))))
+          (should (= 2 (length (plist-get result :keys)))))
+        ;; Embedded images are not uploaded, so not reported.
+        (should-not (plist-get (s3-publish-api-publish org "test") :images))))))
+
 (ert-deftest s3-publish-test-net-large-image-is-uploaded ()
   "An image over the inline size limit is uploaded instead of embedded."
   (test-s3-publish-with-fake-s3

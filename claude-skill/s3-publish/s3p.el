@@ -103,7 +103,8 @@ A plist becomes an object, any other list an array, a symbol a string."
                                              title run-code)))
          (unless (eq (plist-get result :status) 'done)
            (error "%s" (or (plist-get result :error) "Upload did not complete")))
-         (list :url (plist-get result :url) :keys (plist-get result :keys)))))
+         (list :url (plist-get result :url) :keys (plist-get result :keys)
+               :images (vconcat (plist-get result :images))))))
     ("list"
      (unless args (s3p--usage))
      (vconcat (s3-publish-api-list (car args) (equal (cadr args) "--bucket"))))

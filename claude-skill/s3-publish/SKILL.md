@@ -87,9 +87,14 @@ s3p sign TARGET DURATION PROFILE               # DURATION: 3600, 30m, 12h, 7d, 2
 ### Publishing
 
 `s3p publish /path/report.org PROFILE` returns
-`{"url": ..., "keys": [...]}` once everything is uploaded. Give the user
-the `url` — for a document, the HTML page. On failure report the
-`error`; do not claim success.
+`{"url": ..., "keys": [...], "images": [...]}` once everything is
+uploaded. Give the user the `url` — for a document, the HTML page. On
+failure report the `error`; do not claim success.
+
+`images` lists the keys of local images uploaded beside a document
+(those too large to embed in the page). Mention them: deleting the
+document keeps them, so they need deleting on their own if the user
+wants them gone.
 
 ### Listing
 
@@ -106,7 +111,8 @@ key** — for a document both the HTML page and its source, whichever of
 the two (or the source file's path) you pass — and removes its feed and
 index entry. It returns `{"deleted": [keys]}`, empty if there was
 nothing. Images uploaded beside a page are kept, as other pages may use
-them.
+them; delete one by its URL or key (`s3p delete IMAGE_URL PROFILE`)
+after checking no other published page uses it.
 
 Deleting is permanent and breaks links people may have. **Confirm with
 the user before deleting**, naming what will go (for a document, both

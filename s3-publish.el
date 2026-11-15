@@ -419,6 +419,9 @@ nil straight away."
         (delete-directory file t)
       (delete-file file))))
 
+(defvar s3-publish--uploaded-images nil
+  "The keys of the images the last document publish uploaded beside it.")
+
 (defvar s3-publish--quiet nil
   "Non-nil to publish without touching the kill ring.
 Bound by the programmatic API, whose caller is not the person at the
@@ -1976,6 +1979,7 @@ Returns the HTML URL, which is also copied to the kill ring."
       (write-region (point-min) (point-max) html-file nil 'quiet))
     (let ((images (s3-publish--localize-images
                    html-file (file-name-directory source-file) profile)))
+      (setq s3-publish--uploaded-images (mapcar #'cdr images))
       (s3-publish--run
        html-url
        (format "%s/%s" (plist-get profile :bucket) html-key)
@@ -4333,11 +4337,11 @@ as they would, just without results."
                                      (_ language))))
                    nil t))))))
 
-(defun s3-publish--api-result (url keys)
-  "Return the result of an API publish of URL as KEYS."
+(defun s3-publish--api-result (url keys &optional images)
+  "Return the result of an API publish of URL as KEYS, with IMAGES beside."
   (let* ((job s3-publish--job-counter)
          (status (s3-publish-api-status job)))
-    (append (list :url url :keys keys :job job
+    (append (list :url url :keys keys :images images :job job
                   :status (plist-get status :status))
             (and (plist-get status :error)
                  (list :error (plist-get status :error))))))
@@ -4356,7 +4360,9 @@ What is published is FILE as it is on disk: a buffer visiting it is not
 saved or read.  No code in it is run unless RUN-CODE is non-nil; see
 `s3-publish--org-file-export-to-html'.
 
-Returns a plist: :url, :keys (every object written), :job and :status.
+Returns a plist: :url, :keys (the objects published for FILE), :images
+(the keys of local images uploaded beside a document, which deleting
+the document keeps), :job and :status.
 With `s3-publish-async' on the upload is still running or queued when
 this returns; poll `s3-publish-api-status' with the :job number until
 its :status is `done' or `failed'."
@@ -4378,6 +4384,7 @@ its :status is `done' or `failed'."
                                  (or title (file-name-nondirectory file))
                                  stamp))
           (s3-publish--api-result url (list key)))
+      (setq s3-publish--uploaded-images nil)
       (let* ((text (with-temp-buffer
                      (insert-file-contents file)
                      (buffer-string)))
@@ -4397,7 +4404,8 @@ its :status is `done' or `failed'."
                    (if org-p "Org source" "Markdown source")
                    t)))
         (s3-publish--api-result
-         url (list (concat (file-name-sans-extension key) ".html") key))))))
+         url (list (concat (file-name-sans-extension key) ".html") key)
+         s3-publish--uploaded-images)))))
 
 (defun s3-publish-api-status (&optional job)
   "Report on background uploads.
