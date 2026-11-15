@@ -1723,7 +1723,7 @@ does not depend on `s3-publish-html-theme'; a theme can restyle
 (defconst s3-publish-html-link-expiry-script "\
 <style>
 :where(#s3-publish-expiry) {
-  margin: -0.2em -1em 1em;
+  margin: -0.4em -1em 1em;
   padding: 0.35em 1em;
   background: #10281a;
   border-bottom: 1px solid #2ea043;
@@ -1775,10 +1775,12 @@ does not depend on `s3-publish-html-theme'; a theme can restyle
     var title = content.querySelector('.title');
     if (title) {
       title.parentNode.insertBefore(bar, title.nextSibling);
-      // Line up with the title banner, however the theme sets it out.
+      // Line up with the title banner, however the theme sets it out:
+      // its sides, and flush under it, cancelling its bottom margin.
       var style = window.getComputedStyle(title);
       bar.style.marginLeft = style.marginLeft;
       bar.style.marginRight = style.marginRight;
+      bar.style.marginTop = '-' + style.marginBottom;
     } else {
       content.insertBefore(bar, content.firstChild);
     }
