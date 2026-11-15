@@ -945,6 +945,16 @@ pre.example {
 	background: #282928;
 }
 
+/* Org 9.7 and later wrap a block's text in `<pre><code>'.  The inline
+   `code' rule must not reach it: its horizontal margin indents only the
+   first line, since an inline element's margin sits before its first box. */
+pre code {
+	margin: 0;
+	color: inherit;
+	font-weight: inherit;
+	font-size: inherit;
+}
+
 /* Source block language label.  s3-publish tags each `pre.src' with a
    `data-lang' attribute, since CSS cannot read the language out of Org's
    `src-LANG' class. */
