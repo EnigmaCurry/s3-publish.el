@@ -302,6 +302,218 @@ opposed to the index and feed).  Applies the profile's ACL and
           (s3-publish--put profile file key mime-type))
       (delete-file file))))
 
+;;; Background uploads --------------------------------------------------------
+;; The slow part of publishing is the network: uploading, then fetching,
+;; editing and re-uploading the RSS feed and HTML index.  When
+;; `s3-publish-async' is on, that part runs in a child `emacs --batch',
+;; so Emacs stays usable.  Everything that needs this session -- exporting,
+;; prompts, credentials -- is done before the job starts.
+;;
+;; Jobs run one at a time, because each one edits the shared feed and
+;; index: two at once would each overwrite the other's entry.
+
+(defcustom s3-publish-async t
+  "When non-nil, uploads run in the background and Emacs stays usable.
+
+A published URL depends only on the file and the profile, so it is
+known before the upload starts: it is copied to the kill ring at once,
+and a message reports when the upload has finished, or failed.  The
+output of every background upload is kept in the *s3-publish-log*
+buffer.
+
+Uploads run one after another, never at once, since each one edits the
+RSS feed and HTML index.  An upload of a document still waiting its turn
+is replaced by a newer one of the same document, so saving repeatedly
+with `s3-publish-on-save-mode' does not pile up uploads.
+
+Removing files is always done in the foreground."
+  :type 'boolean
+  :group 's3-publish)
+
+(defconst s3-publish--library (or load-file-name buffer-file-name)
+  "The file s3-publish was loaded from, which background jobs load too.")
+
+(defvar s3-publish--async-variables '(s3-publish-cache-control)
+  "Options that background jobs need, copied into each job.")
+
+(defvar s3-publish--queue nil
+  "Background jobs waiting to run, oldest first.")
+
+(defvar s3-publish--running nil
+  "The process of the background job running now, or nil.")
+
+(defconst s3-publish--result-marker "\n@@s3-publish-result@@ "
+  "Printed by a background job before its result.")
+
+(defconst s3-publish--error-marker "\n@@s3-publish-error@@ "
+  "Printed by a background job before the message of the error it hit.")
+
+(defun s3-publish--run (label id function args &optional cleanup)
+  "Call FUNCTION with ARGS, in the background if `s3-publish-async' says to.
+
+LABEL names the job in messages, typically the URL being published.  ID
+identifies what the job publishes: a waiting job with the same ID is
+replaced by this one.  CLEANUP lists files to delete once the job is
+done, whether or not it succeeded.  ARGS must print readably.
+
+In the foreground, returns FUNCTION's value.  In the background, returns
+nil straight away."
+  (if (not s3-publish-async)
+      (unwind-protect (apply function args)
+        (mapc #'s3-publish--delete-if-exists cleanup))
+    (let ((job (list :label label :id id :function function :args args
+                     :cleanup cleanup)))
+      (setq s3-publish--queue
+            (append (seq-remove
+                     (lambda (queued)
+                       (when (and id (equal (plist-get queued :id) id))
+                         (mapc #'s3-publish--delete-if-exists
+                               (cl-set-difference (plist-get queued :cleanup)
+                                                  cleanup :test #'equal))
+                         t))
+                     s3-publish--queue)
+                    (list job))))
+    (s3-publish--start-next)
+    nil))
+
+(defun s3-publish--delete-if-exists (file)
+  "Delete FILE if it exists."
+  (when (and file (file-exists-p file))
+    (delete-file file)))
+
+(defun s3-publish--announce (url)
+  "Copy URL to the kill ring, and say whether it is published or on its way."
+  (kill-new url)
+  (if s3-publish-async
+      (message "Publishing in the background (URL copied): %s" url)
+    (message "%s" url))
+  url)
+
+(defun s3-publish--start-next ()
+  "Start the next waiting background job, unless one is running."
+  (when (and (null s3-publish--running) s3-publish--queue)
+    (let* ((job (pop s3-publish--queue))
+           (job-file (make-temp-file "s3-publish-job-" nil ".eld"))
+           (buffer (generate-new-buffer " *s3-publish-job*")))
+      ;; The job carries the credentials, so it is written to a private
+      ;; temporary file, which the child deletes as soon as it has read it.
+      (let ((coding-system-for-write 'utf-8-unix)
+            (print-length nil)
+            (print-level nil)
+            (print-escape-newlines t))
+        (write-region
+         (prin1-to-string
+          (list :function (plist-get job :function)
+                :args (plist-get job :args)
+                :vars (mapcar (lambda (var) (cons var (symbol-value var)))
+                              s3-publish--async-variables)))
+         nil job-file nil 'quiet))
+      (condition-case err
+          (let ((process
+                 (make-process
+                  :name "s3-publish"
+                  :buffer buffer
+                  :command (list (expand-file-name invocation-name
+                                                   invocation-directory)
+                                 "-Q" "--batch" "-l" s3-publish--library
+                                 "--eval"
+                                 (format "(s3-publish--run-job-file %S)" job-file))
+                  :connection-type 'pipe
+                  :noquery t
+                  :sentinel #'s3-publish--job-sentinel)))
+            (process-put process 's3-publish-job job)
+            (process-put process 's3-publish-job-file job-file)
+            (setq s3-publish--running process))
+        (error
+         (s3-publish--delete-if-exists job-file)
+         (mapc #'s3-publish--delete-if-exists (plist-get job :cleanup))
+         (kill-buffer buffer)
+         (message "s3-publish: could not start upload of %s: %s"
+                  (plist-get job :label) (error-message-string err))
+         (s3-publish--start-next))))))
+
+(defun s3-publish--job-sentinel (process _event)
+  "Report on the background job PROCESS once it has finished."
+  (when (memq (process-status process) '(exit signal))
+    (let* ((job (process-get process 's3-publish-job))
+           (label (plist-get job :label))
+           (buffer (process-buffer process))
+           (output (if (buffer-live-p buffer)
+                       (with-current-buffer buffer (buffer-string))
+                     ""))
+           (failure
+            (cond
+             ((string-match (regexp-quote s3-publish--error-marker) output)
+              (string-trim (substring output (match-end 0))))
+             ((or (not (eq (process-status process) 'exit))
+                  (not (zerop (process-exit-status process)))
+                  (not (string-match-p (regexp-quote s3-publish--result-marker)
+                                       output)))
+              (format "the upload process exited with status %s"
+                      (process-exit-status process))))))
+      (unwind-protect
+          (progn
+            (s3-publish--delete-if-exists (process-get process 's3-publish-job-file))
+            (mapc #'s3-publish--delete-if-exists (plist-get job :cleanup))
+            (with-current-buffer (get-buffer-create "*s3-publish-log*")
+              (let ((inhibit-read-only t))
+                (goto-char (point-max))
+                (insert (format "\n[%s] %s %s\n"
+                                (format-time-string "%F %T")
+                                (if failure "FAILED" "done")
+                                label)
+                        (string-trim output) "\n")))
+            (if failure
+                (progn
+                  (display-warning 's3-publish
+                                   (format "Upload of %s failed: %s" label failure)
+                                   :error)
+                  (message "s3-publish: upload of %s FAILED, see *s3-publish-log*"
+                           label))
+              (message "Published: %s" label)))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))
+        (setq s3-publish--running nil)
+        (s3-publish--start-next)))))
+
+(defun s3-publish--run-job-file (file)
+  "Run the background job described in FILE, then exit Emacs.
+This runs in the child Emacs; FILE is deleted as soon as it is read."
+  (let ((job (with-temp-buffer
+               (let ((coding-system-for-read 'utf-8-unix))
+                 (insert-file-contents file))
+               (read (current-buffer)))))
+    (delete-file file)
+    (condition-case err
+        (progn
+          (dolist (binding (plist-get job :vars))
+            (set (car binding) (cdr binding)))
+          (let ((result (apply (plist-get job :function) (plist-get job :args))))
+            (princ (concat s3-publish--result-marker
+                           (prin1-to-string result) "\n"))
+            (kill-emacs 0)))
+      (error
+       (princ (concat s3-publish--error-marker (error-message-string err) "\n"))
+       (kill-emacs 1)))))
+
+(defun s3-publish--wait (&optional timeout)
+  "Wait until every background job has finished, or TIMEOUT seconds pass.
+Returns non-nil if all of them finished."
+  (let ((deadline (and timeout (+ (float-time) timeout))))
+    (while (and (or s3-publish--running s3-publish--queue)
+                (or (null deadline) (< (float-time) deadline)))
+      (accept-process-output nil 0.05))
+    (not (or s3-publish--running s3-publish--queue))))
+
+(defun s3-publish--confirm-exit ()
+  "Ask before exiting Emacs while uploads are still running or waiting."
+  (or (not (or s3-publish--running s3-publish--queue))
+      (yes-or-no-p (format "%d s3-publish upload(s) unfinished; exit anyway? "
+                           (+ (length s3-publish--queue)
+                              (if s3-publish--running 1 0))))))
+
+(add-hook 'kill-emacs-query-functions #'s3-publish--confirm-exit)
+
 (defun s3-publish--get (profile key)
   "Return the contents of KEY in PROFILE's bucket, or nil if it is missing."
   (let ((file (make-temp-file "s3-publish-get-")))
@@ -1529,18 +1741,19 @@ Returns the HTML URL, which is also copied to the kill ring."
       (write-region (point-min) (point-max) html-file nil 'quiet))
     (let ((images (s3-publish--localize-images
                    html-file (file-name-directory source-file) profile)))
-      (s3-publish--transfer-document
-       profile
-       (append (mapcar (lambda (image) (list (car image) (cdr image) nil))
-                       images)
-               (list (list source-file source-key "text/plain; charset=utf-8")
-                     (list html-file html-key "text/html")))
-       html-url title
-       (format "%s<p>View: <a href=\"%s\">HTML</a> | <a href=\"%s\">%s</a></p>"
-               description html-url source-url source-label)))
-    (kill-new html-url)
-    (message "%s" html-url)
-    html-url))
+      (s3-publish--run
+       html-url
+       (format "%s/%s" (plist-get profile :bucket) html-key)
+       's3-publish--transfer-document
+       (list profile
+             (append (mapcar (lambda (image) (list (car image) (cdr image) nil))
+                             images)
+                     (list (list source-file source-key "text/plain; charset=utf-8")
+                           (list html-file html-key "text/html")))
+             html-url title
+             (format "%s<p>View: <a href=\"%s\">HTML</a> | <a href=\"%s\">%s</a></p>"
+                     description html-url source-url source-label))))
+    (s3-publish--announce html-url)))
 
 (defun s3-publish--transfer-document (profile uploads url title description)
   "Upload a document's files to PROFILE's bucket, then list it.
@@ -2456,16 +2669,24 @@ the kill ring and displayed in the echo area."
                              (format-time-string "%Y-%m-%d %H:%M"))))
     (with-temp-file temp-file
       (insert contents))
-    ;; Prompt for a profile.
-    (let* ((profile-name (s3-publish--read-profile-name))
-           (profile
-            (s3-publish-get-credentials (s3-publish-get-profile profile-name)))
-           (upload-result (s3-publish-upload-file temp-file profile title description))
-           (url (if (stringp upload-result) upload-result upload-result)))
-      (delete-file temp-file)
-      (kill-new url)
-      (message "%s" url)
-      url)))
+    (s3-publish--publish-temp-file temp-file title description)))
+
+(defun s3-publish--publish-temp-file (temp-file title description)
+  "Publish TEMP-FILE, a temporary copy of some text, and delete it after.
+Prompts for the profile.  TITLE and DESCRIPTION make its entry in the
+RSS feed and HTML index.  Returns the URL, also copied to the kill ring."
+  (let ((profile (condition-case err
+                     (s3-publish--select-profile)
+                   ((error quit)
+                    (s3-publish--delete-if-exists temp-file)
+                    (signal (car err) (cdr err))))))
+    (let ((url (s3-publish--object-url
+                profile (s3-publish-get-file-key temp-file
+                                                 (plist-get profile :salt)))))
+      (s3-publish--run url nil 's3-publish-upload-file
+                       (list temp-file profile title description)
+                       (list temp-file))
+      (s3-publish--announce url))))
 
 (defun s3-publish-region (start end)
   "Publish the currently selected region to S3.
@@ -2487,16 +2708,7 @@ and displayed in the echo area."
                             (format-time-string "%Y-%m-%d %H:%M"))))
     (with-temp-file temp-file
       (insert region-text))
-    ;; Prompt for a profile.
-    (let* ((profile-name (s3-publish--read-profile-name))
-           (profile (s3-publish-get-credentials
-                     (s3-publish-get-profile profile-name)))
-           (upload-result (s3-publish-upload-file temp-file profile title description))
-           (url (if (stringp upload-result) upload-result upload-result)))
-      (delete-file temp-file)
-      (kill-new url)
-      (message "%s" url)
-      url)))
+    (s3-publish--publish-temp-file temp-file title description)))
 
 ;; Add command to view RSS feed or HTML index
 (defun s3-publish-view-index (profile-name)
@@ -2589,23 +2801,34 @@ Prompts to use alternative credentials since this operation requires elevated pr
 FILES should be a list of file paths.
 This function validates that every file exists and is not a directory
 (allowing symlinks to files), and aborts if any file is invalid.
-Each file is uploaded using `s3-publish-upload-file' with PROFILE.
-All returned URLs (one per file) are concatenated (one per line),
+Each file is uploaded using `s3-publish-upload-file' with PROFILE, in
+the background when `s3-publish-async' is on.
+All the URLs (one per file) are concatenated (one per line),
 copied to the kill ring, and returned."
   (unless (and files (cl-every (lambda (f)
                                  (and (file-exists-p f)
                                       (not (file-directory-p f))))
                                files))
     (error "One or more selected files do not exist or are not regular files"))
-  (let ((urls (mapcar (lambda (file)
-                        (s3-publish-upload-file file profile))
-                      files))
-        (result ""))
-    (setq result (string-join urls "\n"))
+  (let* ((files (mapcar #'expand-file-name files))
+         (urls (mapcar (lambda (file)
+                         (s3-publish--object-url
+                          profile (s3-publish-get-file-key
+                                   file (plist-get profile :salt))))
+                       files))
+         (result (string-join urls "\n")))
+    (s3-publish--run (format "%d file(s)" (length files)) nil
+                     's3-publish--upload-files (list files profile))
     (kill-new result)
-    (message "Uploaded files. URLs (one per line) copied to kill ring:\n%s"
+    (message "%s files. URLs (one per line) copied to kill ring:\n%s"
+             (if s3-publish-async "Uploading" "Uploaded")
              result)
     result))
+
+(defun s3-publish--upload-files (files profile)
+  "Upload each of FILES with `s3-publish-upload-file' and PROFILE.
+Returns the list of URLs."
+  (mapcar (lambda (file) (s3-publish-upload-file file profile)) files))
 
 (defun s3-publish-dired-upload-files ()
   "In Dired, upload the marked files to S3.

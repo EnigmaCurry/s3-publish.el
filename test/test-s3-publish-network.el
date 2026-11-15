@@ -313,4 +313,94 @@
   (should-not (s3-publish--local-image-file "data:image/png;base64,AA" "/d/"))
   (should-not (s3-publish--local-image-file "//e.com/a.png" "/d/")))
 
+;;; Background uploads
+
+(defmacro test-s3-publish-async (&rest body)
+  "Run BODY with background uploads on, and a clean queue and log."
+  (declare (indent 0) (debug t))
+  `(let ((s3-publish-async t)
+         (s3-publish--queue nil)
+         (s3-publish--running nil))
+     (when (get-buffer "*s3-publish-log*")
+       (kill-buffer "*s3-publish-log*"))
+     (unwind-protect (progn ,@body)
+       (s3-publish--wait 30))))
+
+(defun test-s3-publish--log-buffer ()
+  "Return the contents of *s3-publish-log*."
+  (with-current-buffer (get-buffer-create "*s3-publish-log*")
+    (buffer-string)))
+
+(ert-deftest s3-publish-test-async-org-document ()
+  "A background publish returns the URL at once and uploads in a child."
+  (test-s3-publish-with-fake-s3
+    (test-s3-publish-async
+      (test-s3-publish-with-file file "doc.org" "#+TITLE: Doc\n\nHello.\n"
+        (with-current-buffer (find-file-noselect file)
+          (unwind-protect
+              (let ((url (s3-publish-org-buffer)))
+                (should (equal (car kill-ring) url))
+                (should (s3-publish--wait 30))
+                (should (string-match-p
+                         "Hello" (test-s3-publish--object
+                                  (test-s3-publish--key file ".html"))))
+                (should (string-match-p (regexp-quote url)
+                                        (test-s3-publish--object "index.xml")))
+                (should (string-match-p (concat "done " (regexp-quote url))
+                                        (test-s3-publish--log-buffer)))
+                ;; The child ran s3cmd with the config, and deleted it.
+                (should (cl-every (lambda (l) (string-prefix-p "config=present" l))
+                                  (test-s3-publish--log))))
+            (kill-buffer)))))))
+
+(ert-deftest s3-publish-test-async-buffer-cleans-up ()
+  "A background buffer publish deletes its temporary copy afterwards."
+  (test-s3-publish-with-fake-s3
+    (test-s3-publish-async
+      (with-temp-buffer
+        (insert "some text")
+        (let* ((temps (lambda () (directory-files temporary-file-directory nil
+                                                  "\\`s3-publish-\\(buffer\\|job\\)-")))
+               (before (funcall temps))
+               (url (s3-publish-buffer)))
+          (should (s3-publish--wait 30))
+          (should (equal (test-s3-publish--object (file-name-nondirectory url))
+                         "some text"))
+          (should (equal before (funcall temps))))))))
+
+(ert-deftest s3-publish-test-async-failure-is-reported ()
+  "A failed background upload is logged and warned about."
+  (test-s3-publish-with-fake-s3
+    (test-s3-publish-async
+      (let ((process-environment (cons "FAKE_S3_FAIL=1" process-environment))
+            (warnings nil))
+        (cl-letf (((symbol-function 'display-warning)
+                   (lambda (_type message &rest _) (push message warnings))))
+          (with-temp-buffer
+            (insert "x")
+            (let ((url (s3-publish-buffer)))
+              (should (s3-publish--wait 30))
+              (should (string-match-p (concat "FAILED " (regexp-quote url))
+                                      (test-s3-publish--log-buffer)))
+              (should (string-match-p "simulated failure" (car warnings))))))))))
+
+(ert-deftest s3-publish-test-async-jobs-run-in-order-and-coalesce ()
+  "Jobs run one at a time; a waiting job is replaced by a newer one."
+  (test-s3-publish-with-fake-s3
+    (test-s3-publish-async
+      (let ((profile (s3-publish-get-credentials test-s3-publish--profile)))
+        (s3-publish--run "a" "a" 's3-publish--put-string
+                         (list profile "first" "a.txt" "text/plain"))
+        (s3-publish--run "b" "b" 's3-publish--put-string
+                         (list profile "old" "b.txt" "text/plain"))
+        (s3-publish--run "b" "b" 's3-publish--put-string
+                         (list profile "new" "b.txt" "text/plain"))
+        ;; "a" is running; only the newer "b" waits.
+        (should s3-publish--running)
+        (should (= 1 (length s3-publish--queue)))
+        (should (s3-publish--wait 30))
+        (should (equal (test-s3-publish--object "a.txt") "first"))
+        (should (equal (test-s3-publish--object "b.txt") "new"))
+        (should (= 2 (length (test-s3-publish--log))))))))
+
 (provide 'test-s3-publish-network)

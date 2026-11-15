@@ -543,6 +543,32 @@ it will keep the same key/URL. However, there are two exceptions:
 Both of these create temporary files with random names in order to
 export them. Therefore these will always make new S3 keys.
 
+** Background uploads
+
+Uploading, and updating the RSS feed and HTML index, happen in the
+background, in a separate =emacs --batch= process, so Emacs stays
+usable while they run. A URL depends only on the file and the profile,
+so it is known before the upload starts: it is copied to the
+=kill-ring= straight away, and a message reports when the upload has
+finished. If an upload fails you get a warning; the output of every
+upload is kept in the =*s3-publish-log*= buffer.
+
+Uploads run one at a time, in order, since each one edits the shared
+feed and index. A document still waiting for its turn is replaced by a
+newer upload of the same document. Emacs asks before exiting while
+uploads are unfinished.
+
+Exporting, prompts and credential lookup still happen in Emacs before
+the upload starts; only the network traffic moves. Removing files
+always happens in the foreground. To upload in the foreground too, as
+before:
+
+#+begin_src emacs-lisp
+  (setq s3-publish-async nil)
+#+end_src
+
+** Caching
+
 Every upload is sent with a =Cache-Control: no-cache= header, so
 browsers and CDNs check with the bucket before reusing a cached copy.
 A republished page, the HTML index and the RSS feed therefore show
