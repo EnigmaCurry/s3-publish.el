@@ -7,11 +7,9 @@ Example: https://org.nyc3.digitaloceanspaces.com/8ik4g-8vbao-w4adc-nsjxe-qr0uo.h
 
 ------------------------------------------------------------
 
-#+begin_html
-<img alt="s3-publish.el screenshot" src="screenshot.webp"/>
-#+end_html
+=M-x s3-publish-buffer=
 
-The intended purpose is for easily sharing files on the web, using S3
+The intended purpose is for easily publishing files on the web, using S3
 as a paste-bin service. The object keys of the uploaded files will be
 renamed with a salted hash of the path + file extension, so the URLs
 are serviceable, but not really that pretty:
