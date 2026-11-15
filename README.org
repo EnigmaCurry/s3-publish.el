@@ -626,6 +626,22 @@ their new contents straight away. Set =s3-publish-cache-control= to
 another value (e.g. ="max-age=300"=) to cache longer, or to =nil= to
 send no header at all.
 
+** Listing published files
+
+=M-x s3-publish-list= shows everything published with a profile, newest
+first, read from its RSS feed (so the profile needs the feed turned
+on). On a line:
+
+| Key   | Action                                                    |
+|-------+-----------------------------------------------------------|
+| =RET= | Open the file in a web browser                            |
+| =w=   | Copy its URL                                              |
+| =s=   | Copy a signed URL that expires                            |
+| =D=   | Delete it from the bucket, the feed and the index         |
+| =g=   | Fetch the list again                                      |
+
+Deleting a document deletes its source file along with its HTML page.
+
 ** Removing URLs
 
 You can remove the objects by supplying the URLs:

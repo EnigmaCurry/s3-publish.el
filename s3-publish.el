@@ -3301,6 +3301,166 @@ copied to the kill ring, and displayed."
       result-str)))
 
 
+;;; Listing published files ---------------------------------------------------
+
+(defvar-local s3-publish-list--profile-name nil
+  "The profile whose published files this `s3-publish-list-mode' buffer lists.")
+
+(defun s3-publish--feed-items (feed)
+  "Parse the RSS FEED string into a list of plists, one per item.
+Each has :title, :link, :date (a time value or nil) and :description.
+Parsed leniently, by pattern, since titles are written into the feed
+unescaped and need not be well-formed XML."
+  (let ((items nil))
+    (with-temp-buffer
+      (insert feed)
+      (goto-char (point-min))
+      (while (re-search-forward "<item>\\(\\(?:.\\|\n\\)*?\\)</item>" nil t)
+        (let ((item (match-string 1)))
+          (cl-flet ((tag (name)
+                      (when (string-match
+                             (format "<%s>\\(\\(?:.\\|\n\\)*?\\)</%s>" name name)
+                             item)
+                        (let ((text (string-trim (match-string 1 item))))
+                          (if (string-match "\\`<!\\[CDATA\\[\\(\\(?:.\\|\n\\)*\\)\\]\\]>\\'" text)
+                              (match-string 1 text)
+                            text)))))
+            (let ((date (tag "pubDate")))
+              (push (list :title (or (tag "title") "")
+                          :link (or (tag "link") "")
+                          :date (and date (ignore-errors (date-to-time date)))
+                          :description (or (tag "description") ""))
+                    items))))))
+    (nreverse items)))
+
+(defun s3-publish-list (profile-name)
+  "List the files published with PROFILE-NAME, newest first.
+
+The list comes from the profile's RSS feed, so it needs the feed turned
+on, and shows what the feed shows: files published to a public profile.
+In the list:
+
+\\{s3-publish-list-mode-map}"
+  (interactive (list (s3-publish--read-profile-name)))
+  (let ((profile (s3-publish-get-profile profile-name)))
+    (unless (plist-get profile :rss-feed)
+      (user-error "Profile %s keeps no RSS feed, which is what lists its files"
+                  profile-name)))
+  (with-current-buffer (get-buffer-create
+                        (format "*s3-publish: %s*" profile-name))
+    (s3-publish-list-mode)
+    (setq s3-publish-list--profile-name profile-name)
+    (s3-publish-list-refresh)
+    (pop-to-buffer (current-buffer))))
+
+(defun s3-publish-list--profile ()
+  "Return this list's profile, with credentials."
+  (s3-publish-get-credentials (s3-publish-get-profile s3-publish-list--profile-name)))
+
+(defun s3-publish-list-refresh ()
+  "Fetch the feed again and redisplay the list."
+  (interactive)
+  (let* ((feed (s3-publish--get (s3-publish-list--profile) s3-publish-rss-filename))
+         (items (and feed (s3-publish--feed-items feed))))
+    (setq tabulated-list-entries
+          (mapcar (lambda (item)
+                    (list (plist-get item :link)
+                          (vector (if (plist-get item :date)
+                                      (format-time-string "%Y-%m-%d %H:%M"
+                                                          (plist-get item :date))
+                                    "")
+                                  (plist-get item :title)
+                                  (plist-get item :link))))
+                  (sort items
+                        (lambda (a b)
+                          (time-less-p (or (plist-get b :date) 0)
+                                       (or (plist-get a :date) 0))))))
+    (tabulated-list-print t)
+    (unless feed
+      (message "Nothing published with %s yet" s3-publish-list--profile-name))))
+
+(defun s3-publish-list--url ()
+  "Return the URL of the entry at point, or signal an error."
+  (or (tabulated-list-get-id) (user-error "No file on this line")))
+
+(defun s3-publish-list-browse ()
+  "Open the file at point in a web browser."
+  (interactive)
+  (browse-url (s3-publish-list--url)))
+
+(defun s3-publish-list-copy-url ()
+  "Copy the URL of the file at point."
+  (interactive)
+  (let ((url (s3-publish-list--url)))
+    (kill-new url)
+    (message "Copied %s" url)))
+
+(defun s3-publish-list-sign-url (duration)
+  "Copy a signed URL for the file at point that works for DURATION."
+  (interactive
+   (list (read-string (format "Valid for (default %s): "
+                              (or s3-publish-signed-url-expiry "7d"))
+                      nil nil (or s3-publish-signed-url-expiry "7d"))))
+  (s3-publish-sign-url s3-publish-list--profile-name (s3-publish-list--url) duration))
+
+(defun s3-publish-list--companions (profile url)
+  "Return the other objects of PROFILE's bucket that the entry for URL links.
+For a document, that is its source file, linked from the feed entry."
+  (let* ((feed (s3-publish--get profile s3-publish-rss-filename))
+         (item (seq-find (lambda (item) (equal (plist-get item :link) url))
+                         (and feed (s3-publish--feed-items feed))))
+         (description (or (plist-get item :description) ""))
+         (start 0)
+         (urls nil))
+    (while (string-match "href=\"\\([^\"]+\\)\"" description start)
+      (setq start (match-end 0))
+      (let ((link (match-string 1 description)))
+        (when (and (not (equal link url))
+                   (ignore-errors (s3-publish--url-key profile link)))
+          (cl-pushnew link urls :test #'equal))))
+    (nreverse urls)))
+
+(defun s3-publish-list-delete ()
+  "Delete the file at point from the bucket, and from the feed and index.
+A document's source file is deleted along with its HTML page."
+  (interactive)
+  (let* ((url (s3-publish-list--url))
+         (profile (s3-publish-list--profile))
+         (companions (s3-publish-list--companions profile url)))
+    (when (yes-or-no-p (format "Delete %s%s? " url
+                               (if companions
+                                   (format " and %d linked file(s)"
+                                           (length companions))
+                                 "")))
+      (dolist (companion companions)
+        (s3-publish--delete-key profile (s3-publish--url-key profile companion) t))
+      (s3-publish--remove-url profile url)
+      (s3-publish-list-refresh)
+      (message "Deleted %s" url))))
+
+(defvar s3-publish-list-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "RET") #'s3-publish-list-browse)
+    (define-key map "w" #'s3-publish-list-copy-url)
+    (define-key map "s" #'s3-publish-list-sign-url)
+    (define-key map "D" #'s3-publish-list-delete)
+    (define-key map "g" #'s3-publish-list-refresh)
+    map)
+  "Keymap for `s3-publish-list-mode'.")
+
+(define-derived-mode s3-publish-list-mode tabulated-list-mode "S3 Published"
+  "Major mode listing the files published with an s3-publish profile.
+\\<s3-publish-list-mode-map>
+\\[s3-publish-list-browse] opens a file in the browser, \\[s3-publish-list-copy-url] copies its URL,
+\\[s3-publish-list-sign-url] copies a signed URL that expires, \\[s3-publish-list-delete] deletes it, and
+\\[s3-publish-list-refresh] fetches the list again."
+  (setq tabulated-list-format
+        [("Published" 16 t)
+         ("Title" 40 t)
+         ("URL" 0 t)])
+  (setq tabulated-list-padding 1)
+  (tabulated-list-init-header))
+
 (defun s3-publish (&optional arg)
   "Publish to S3 in a context-aware (DWIM) way.
 The dispatch priorities are:

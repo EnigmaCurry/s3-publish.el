@@ -551,4 +551,83 @@ an error, since saving must not prompt."
                 (should-not (test-s3-publish--object "index.xml")))
             (kill-buffer)))))))
 
+;;; Listing published files
+
+(ert-deftest s3-publish-test-feed-items ()
+  "Feed items parse, CDATA and unescaped titles included."
+  (let ((items (s3-publish--feed-items
+                "<rss><channel><title>T</title>
+    <item>
+      <title>Fish & Chips</title>
+      <link>https://b.h/1.html</link>
+      <guid>https://b.h/1.html</guid>
+      <description><![CDATA[Hi <a href=\"https://b.h/1.org\">src</a>]]></description>
+      <pubDate>Sat, 14 Nov 2026 22:00:00 -0700</pubDate>
+    </item>
+    <item><title>Two</title><link>https://b.h/2.txt</link></item>
+</channel></rss>")))
+    (should (= 2 (length items)))
+    (should (equal (plist-get (car items) :title) "Fish & Chips"))
+    (should (equal (plist-get (car items) :link) "https://b.h/1.html"))
+    (should (equal (plist-get (car items) :description)
+                   "Hi <a href=\"https://b.h/1.org\">src</a>"))
+    (should (equal (format-time-string "%F %T" (plist-get (car items) :date) t)
+                   "2026-11-15 05:00:00"))
+    (should-not (plist-get (cadr items) :date))))
+
+(defmacro test-s3-publish-with-list (&rest body)
+  "Run BODY in the `s3-publish-list' buffer of the test profile."
+  (declare (indent 0) (debug t))
+  `(let ((display-buffer-overriding-action '(display-buffer-no-window
+                                             (allow-no-window . t))))
+     (save-window-excursion
+       (s3-publish-list "test")
+       (with-current-buffer "*s3-publish: test*"
+         (unwind-protect (progn ,@body)
+           (kill-buffer))))))
+
+(ert-deftest s3-publish-test-list-shows-published-files ()
+  "The list shows each published file, newest first."
+  (test-s3-publish-with-fake-s3
+    (test-s3-publish-with-file a "a.txt" "a"
+      (test-s3-publish-with-file b "b.txt" "b"
+        (let* ((profile (s3-publish-get-credentials test-s3-publish--profile))
+               (url-a (s3-publish-upload-file a profile "A" "first"))
+               (url-b (progn
+                        ;; Feed dates have one second resolution.
+                        (sleep-for 1.1)
+                        (s3-publish-upload-file b profile "B" "second"))))
+          (test-s3-publish-with-list
+            (should (equal (mapcar #'car tabulated-list-entries)
+                           (list url-b url-a)))
+            (goto-char (point-min))
+            (should (equal (tabulated-list-get-id) url-b))
+            (s3-publish-list-copy-url)
+            (should (equal (car kill-ring) url-b))))))))
+
+(ert-deftest s3-publish-test-list-delete-removes-document-and-source ()
+  "Deleting a document from the list deletes its page, source and entry."
+  (test-s3-publish-with-fake-s3
+    (test-s3-publish-with-file file "doc.org" "#+TITLE: Doc\n"
+      (with-current-buffer (find-file-noselect file)
+        (unwind-protect (s3-publish-org-buffer)
+          (kill-buffer)))
+      (should (test-s3-publish--object (test-s3-publish--key file)))
+      (test-s3-publish-with-list
+        (goto-char (point-min))
+        (cl-letf (((symbol-function 'yes-or-no-p) (lambda (&rest _) t)))
+          (s3-publish-list-delete))
+        (should-not tabulated-list-entries))
+      (should-not (test-s3-publish--object (test-s3-publish--key file ".html")))
+      (should-not (test-s3-publish--object (test-s3-publish--key file)))
+      (should-not (string-match-p "<item>" (test-s3-publish--object "index.xml"))))))
+
+(ert-deftest s3-publish-test-list-needs-a-feed ()
+  "Listing a profile without an RSS feed is refused."
+  (test-s3-publish-with-fake-s3
+    (let ((s3-publish-profiles
+           (list (plist-put (copy-sequence test-s3-publish--profile)
+                            :rss-feed nil))))
+      (should-error (s3-publish-list "test") :type 'user-error))))
+
 (provide 'test-s3-publish-network)
