@@ -128,7 +128,10 @@ otherwise renders the title again and lists it twice in the contents."
   "Links, images and autolinks map onto Org link syntax."
   (should (equal (test-s3-publish--org "see [the docs](https://example.com/x)\n")
                  "see [[https://example.com/x][the docs]]"))
-  (should (equal (test-s3-publish--org "![alt text](img.png)\n") "[[img.png]]"))
+  (should (equal (test-s3-publish--org "![alt text](img.png)\n") "[[file:img.png]]"))
+  (should (equal (test-s3-publish--org "![a](/abs/img.png)\n") "[[file:/abs/img.png]]"))
+  (should (equal (test-s3-publish--org "[doc](other.md)\n") "[[file:other.md][doc]]"))
+  (should (equal (test-s3-publish--org "[up](#intro)\n") "[[#intro][up]]"))
   (should (equal (test-s3-publish--org "<https://example.com>\n")
                  "[[https://example.com]]"))
   (should (equal (test-s3-publish--org "[t](https://e.com \"title\")\n")

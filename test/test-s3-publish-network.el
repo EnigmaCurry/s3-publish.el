@@ -197,4 +197,120 @@
                                       (test-s3-publish--object "index.xml"))))
           (kill-buffer))))))
 
+
+;;; Local images
+
+(defun test-s3-publish--write-png (file)
+  "Write a small PNG to FILE (the default favicon) and return its bytes."
+  (let ((bytes (base64-decode-string
+                (substring s3-publish-html-default-favicon
+                           (length "data:image/png;base64,")))))
+    (make-directory (file-name-directory file) t)
+    (let ((coding-system-for-write 'binary))
+      (write-region bytes nil file nil 'quiet))
+    bytes))
+
+(defun test-s3-publish--publish-markdown (file)
+  "Publish the Markdown FILE and return its published HTML."
+  (with-current-buffer (find-file-noselect file)
+    (unwind-protect
+        (progn
+          (s3-publish-markdown-buffer)
+          (test-s3-publish--object (test-s3-publish--key file ".html")))
+      (kill-buffer))))
+
+(ert-deftest s3-publish-test-net-markdown-image-is-inlined ()
+  "A Markdown image beside the document is embedded in the page."
+  (test-s3-publish-with-fake-s3
+    (test-s3-publish-with-file md "doc.md" "# Doc\n\n![shot](shot.png)\n"
+      (let ((png (expand-file-name "shot.png" (file-name-directory md))))
+        (test-s3-publish--write-png png)
+        (let ((html (test-s3-publish--publish-markdown md)))
+          (should (string-match-p "<img src=\"data:image/png;base64," html))
+          (should-not (string-match-p "src=\"shot.png\"" html))
+          (should-not (test-s3-publish--object (test-s3-publish--key png))))))))
+
+(ert-deftest s3-publish-test-net-image-upload-mode ()
+  "With `upload', the image is uploaded beside the page and linked."
+  (test-s3-publish-with-fake-s3
+    (test-s3-publish-with-file md "doc.md" "# Doc\n\n![shot](img/shot.png)\n"
+      (let* ((png (expand-file-name "img/shot.png" (file-name-directory md)))
+             (bytes (test-s3-publish--write-png png))
+             (s3-publish-html-local-images 'upload)
+             (html (test-s3-publish--publish-markdown md))
+             (key (test-s3-publish--key png)))
+        (should (string-match-p
+                 (regexp-quote (format "src=\"https://bkt.fake-endpoint/%s\"" key))
+                 html))
+        (should (equal (string-to-unibyte
+                        (with-temp-buffer
+                          (set-buffer-multibyte nil)
+                          (insert-file-contents-literally
+                           (expand-file-name (concat "objects/bkt/" key)
+                                             test-s3-publish--root))
+                          (buffer-string)))
+                       bytes))
+        ;; Images are content, so they carry the lifecycle tag too.
+        (should (member "--add-header=x-amz-tagging: temp=temp"
+                        (test-s3-publish--object-flags key)))))))
+
+(ert-deftest s3-publish-test-net-large-image-is-uploaded ()
+  "An image over the inline size limit is uploaded instead of embedded."
+  (test-s3-publish-with-fake-s3
+    (test-s3-publish-with-file md "doc.md" "# Doc\n\n![shot](shot.png)\n"
+      (let* ((png (expand-file-name "shot.png" (file-name-directory md)))
+             (s3-publish-html-inline-image-max-size 10))
+        (test-s3-publish--write-png png)
+        (should (string-match-p
+                 (regexp-quote (test-s3-publish--key png))
+                 (test-s3-publish--publish-markdown md)))
+        (should (test-s3-publish--object (test-s3-publish--key png)))))))
+
+(ert-deftest s3-publish-test-net-org-image-is-inlined ()
+  "An Org file link to an image is embedded the same way."
+  (test-s3-publish-with-fake-s3
+    (test-s3-publish-with-file org "doc.org" "#+TITLE: Doc\n\n[[file:pics/a.png]]\n"
+      (test-s3-publish--write-png
+       (expand-file-name "pics/a.png" (file-name-directory org)))
+      (with-current-buffer (find-file-noselect org)
+        (unwind-protect
+            (progn
+              (s3-publish-org-buffer)
+              (should (string-match-p
+                       "<img src=\"data:image/png;base64,"
+                       (test-s3-publish--object
+                        (test-s3-publish--key org ".html")))))
+          (kill-buffer))))))
+
+(ert-deftest s3-publish-test-net-missing-and-remote-images-left-alone ()
+  "Unreadable local images and images on the web are not rewritten."
+  (test-s3-publish-with-fake-s3
+    (test-s3-publish-with-file md "doc.md"
+        "# Doc\n\n![gone](gone.png)\n\n![web](https://example.com/a.png)\n"
+      (let ((html (test-s3-publish--publish-markdown md)))
+        (should (string-match-p "src=\"gone.png\"" html))
+        (should (string-match-p "src=\"https://example.com/a.png\"" html))))))
+
+(ert-deftest s3-publish-test-net-local-images-can-be-left-alone ()
+  "With `s3-publish-html-local-images' nil, image links are untouched."
+  (test-s3-publish-with-fake-s3
+    (test-s3-publish-with-file md "doc.md" "# Doc\n\n![shot](shot.png)\n"
+      (test-s3-publish--write-png
+       (expand-file-name "shot.png" (file-name-directory md)))
+      (let ((s3-publish-html-local-images nil))
+        (should (string-match-p "src=\"shot.png\""
+                                (test-s3-publish--publish-markdown md)))))))
+
+(ert-deftest s3-publish-test-local-image-file ()
+  "Image sources resolve to local files, and URLs do not."
+  (should (equal (s3-publish--local-image-file "a b.png" "/d/") "/d/a b.png"))
+  (should (equal (s3-publish--local-image-file "img/a%20b.png" "/d/")
+                 "/d/img/a b.png"))
+  (should (equal (s3-publish--local-image-file "file:///x/a.png" "/d/") "/x/a.png"))
+  (should (equal (s3-publish--local-image-file "file:a.png" "/d/") "/d/a.png"))
+  (should (equal (s3-publish--local-image-file "a&amp;b.png" "/d/") "/d/a&b.png"))
+  (should-not (s3-publish--local-image-file "https://e.com/a.png" "/d/"))
+  (should-not (s3-publish--local-image-file "data:image/png;base64,AA" "/d/"))
+  (should-not (s3-publish--local-image-file "//e.com/a.png" "/d/")))
+
 (provide 'test-s3-publish-network)

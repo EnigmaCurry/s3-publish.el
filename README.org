@@ -301,6 +301,34 @@ at an external converter that writes Org markup, for example:
 The result is still rendered by Org's HTML exporter, so the look is
 unchanged.
 
+*** Images
+:PROPERTIES:
+:CUSTOM_ID: local-images
+:END:
+
+An image that lives on your disk -- =[[file:diagram.png]]= in Org,
+=![shot](shot.png)= in Markdown -- would be a broken link on the
+published page, since nobody else can read your files. So when an Org
+or Markdown document is published, its local images are carried along:
+
+ * By default each one is embedded in the page itself, as a =data:=
+   URI, so the page stays a single self-contained file.
+ * An image bigger than =s3-publish-html-inline-image-max-size= (1 MiB)
+   is uploaded beside the page instead, and the page links to it. Its
+   key comes from the image's own path, so republishing replaces it
+   rather than adding another copy.
+
+Relative paths are resolved against the document's own directory.
+Images already on the web are left alone, as is a link to an image that
+cannot be read (with a warning).
+
+#+begin_src emacs-lisp
+  ;; Always upload images rather than embedding them:
+  (setq s3-publish-html-local-images 'upload)
+  ;; Or leave image links exactly as Org wrote them:
+  (setq s3-publish-html-local-images nil)
+#+end_src
+
 *** Theming the published HTML
 :PROPERTIES:
 :CUSTOM_ID: html-theme

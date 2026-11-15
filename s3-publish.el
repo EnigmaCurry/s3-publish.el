@@ -1192,15 +1192,17 @@ Returns nil when no theme is configured."
 Kept small on purpose: it rides along in every page s3-publish publishes.
 See `s3-publish-html-favicon'.")
 
-(defconst s3-publish--favicon-media-types
+(defconst s3-publish--image-media-types
   '(("png" . "image/png")
     ("ico" . "image/x-icon")
     ("svg" . "image/svg+xml")
     ("gif" . "image/gif")
     ("jpg" . "image/jpeg")
     ("jpeg" . "image/jpeg")
-    ("webp" . "image/webp"))
-  "Media types for the image extensions `s3-publish-html-favicon' accepts.")
+    ("webp" . "image/webp")
+    ("avif" . "image/avif")
+    ("bmp" . "image/bmp"))
+  "Media types of the images s3-publish embeds as `data:' URIs.")
 
 (defcustom s3-publish-html-favicon 'default
   "Icon linked from HTML published from Org and Markdown buffers.
@@ -1237,7 +1239,7 @@ small one."
      ((file-readable-p (expand-file-name favicon))
       (let* ((path (expand-file-name favicon))
              (ext (downcase (or (file-name-extension path) "")))
-             (type (or (cdr (assoc ext s3-publish--favicon-media-types))
+             (type (or (cdr (assoc ext s3-publish--image-media-types))
                        (error "No known media type for favicon %s" favicon))))
         (concat "data:" type ";base64,"
                 (base64-encode-string
@@ -1490,19 +1492,19 @@ SOURCE-FILE is backed up under its own extension.  EXPORT-FN is called
 with no arguments and must return the path of a freshly exported HTML
 file.  Both objects share one key derived from SOURCE-FILE, differing
 only in extension.  A link back to the source, labelled SOURCE-LABEL, is
-appended to the bottom of the HTML.  TITLE and DESCRIPTION feed the RSS
+appended to the bottom of the HTML, and local images are dealt with as
+`s3-publish-html-local-images' says.  TITLE and DESCRIPTION feed the RSS
 feed and HTML index, where both files appear as a single entry.
 
 Returns the HTML URL, which is also copied to the kill ring."
   (let* ((profile (s3-publish--select-profile))
          (salt (plist-get profile :salt))
-         (full-key (s3-publish-get-file-key source-file salt))
-         (base-key (file-name-sans-extension full-key))
-         (source-ext (or (file-name-extension source-file t) ""))
-         (source-key (concat base-key source-ext))
+         (base-key (file-name-sans-extension
+                    (s3-publish-get-file-key source-file salt)))
+         (source-key (concat base-key (or (file-name-extension source-file t) "")))
          (html-key (concat base-key ".html"))
-         (source-url (s3-publish--upload-no-feed
-                      source-file profile source-key "text/plain; charset=utf-8"))
+         (source-url (s3-publish--object-url profile source-key))
+         (html-url (s3-publish--object-url profile html-key))
          (html-file (funcall export-fn)))
     (setq html-file (if (file-symlink-p html-file) (file-truename html-file) html-file))
     ;; Append a link to the source file at the bottom of the content.
@@ -1525,16 +1527,32 @@ Returns the HTML URL, which is also copied to the kill ring."
           (insert footer))
          (t (goto-char (point-max)) (insert "\n" footer))))
       (write-region (point-min) (point-max) html-file nil 'quiet))
-    (let ((html-url (s3-publish--upload-no-feed html-file profile html-key "text/html")))
-      (when (and (plist-get profile :rss-feed)
-                 (plist-get profile :public-acl))
-        (s3-publish-update-feed
-         profile html-url title
-         (format "%s<p>View: <a href=\"%s\">HTML</a> | <a href=\"%s\">%s</a></p>"
-                 description html-url source-url source-label)))
-      (kill-new html-url)
-      (message "%s" html-url)
-      html-url)))
+    (let ((images (s3-publish--localize-images
+                   html-file (file-name-directory source-file) profile)))
+      (s3-publish--transfer-document
+       profile
+       (append (mapcar (lambda (image) (list (car image) (cdr image) nil))
+                       images)
+               (list (list source-file source-key "text/plain; charset=utf-8")
+                     (list html-file html-key "text/html")))
+       html-url title
+       (format "%s<p>View: <a href=\"%s\">HTML</a> | <a href=\"%s\">%s</a></p>"
+               description html-url source-url source-label)))
+    (kill-new html-url)
+    (message "%s" html-url)
+    html-url))
+
+(defun s3-publish--transfer-document (profile uploads url title description)
+  "Upload a document's files to PROFILE's bucket, then list it.
+UPLOADS is a list of (FILE KEY MIME-TYPE), MIME-TYPE nil to let s3cmd
+guess.  URL, TITLE and DESCRIPTION make the document's entry in the RSS
+feed and HTML index, when the profile keeps them.  Returns URL."
+  (dolist (upload uploads)
+    (s3-publish--put profile (nth 0 upload) (nth 1 upload) (nth 2 upload) t))
+  (when (and (plist-get profile :rss-feed)
+             (plist-get profile :public-acl))
+    (s3-publish-update-feed profile url title description))
+  url)
 
 (defun s3-publish--content-end-position ()
   "Return the position just before the `</div>' that closes the #content div.
@@ -1617,6 +1635,112 @@ contents."
       (when modified
         (write-region (point-min) (point-max) html-file nil 'quiet))))
   html-file)
+
+(defcustom s3-publish-html-local-images 'inline
+  "How published HTML carries images that live on your own disk.
+
+An Org link like [[file:diagram.png]], or Markdown's ![](shot.png),
+exports to an <img> pointing at a local file, which nobody else can
+see.  So when publishing an Org or Markdown document:
+
+`inline'  Embed each local image in the page as a `data:' URI, keeping
+          the page self-contained.  An image larger than
+          `s3-publish-html-inline-image-max-size' is uploaded instead,
+          as with `upload'.
+`upload'  Upload each local image beside the page and link to it.  The
+          image's key is derived from its own path, like any published
+          file, so republishing reuses it rather than adding another.
+nil       Leave image links as Org wrote them.
+
+Images on the web (http:, https:, data: and so on) are never touched.
+A link to an image that cannot be read is left alone with a warning."
+  :type '(choice (const :tag "Embed in the page" inline)
+                 (const :tag "Upload beside the page" upload)
+                 (const :tag "Leave alone" nil))
+  :group 's3-publish)
+
+(defcustom s3-publish-html-inline-image-max-size (* 1024 1024)
+  "Largest local image, in bytes, that is embedded in a published page.
+Base64 makes an embedded image a third larger, and it is downloaded with
+the page every time, so larger images are uploaded beside the page
+instead.  Only applies when `s3-publish-html-local-images' is `inline'."
+  :type 'integer
+  :group 's3-publish)
+
+(defun s3-publish--local-image-file (src directory)
+  "Return the local file an <img> SRC names, relative to DIRECTORY.
+Returns nil when SRC is a URL rather than a local file."
+  (let ((src (s3-publish--html-unescape src)))
+    (cond
+     ((string-match "\\`file://\\(/.*\\)" src)
+      (url-unhex-string (match-string 1 src)))
+     ((string-match "\\`file:\\(.*\\)" src)
+      (expand-file-name (url-unhex-string (match-string 1 src)) directory))
+     ;; Any other scheme, data: included, is not ours to rewrite.
+     ((string-match-p "\\`[a-zA-Z][a-zA-Z0-9+.-]*:" src) nil)
+     ((string-prefix-p "//" src) nil)
+     (t (expand-file-name (url-unhex-string src) directory)))))
+
+(defun s3-publish--html-unescape (text)
+  "Undo the HTML escaping of the few characters an attribute escapes."
+  (let ((case-fold-search nil))
+    (dolist (pair '(("&quot;" . "\"") ("&lt;" . "<") ("&gt;" . ">")
+                    ("&#39;" . "'") ("&amp;" . "&"))
+                  text)
+      (setq text (replace-regexp-in-string (regexp-quote (car pair)) (cdr pair) text t t)))))
+
+(defun s3-publish--file-data-uri (file)
+  "Return FILE as a base64 `data:' URI, or nil for an unknown image type."
+  (let ((type (cdr (assoc (downcase (or (file-name-extension file) ""))
+                          s3-publish--image-media-types))))
+    (when type
+      (concat "data:" type ";base64,"
+              (base64-encode-string
+               (with-temp-buffer
+                 (set-buffer-multibyte nil)
+                 (insert-file-contents-literally file)
+                 (buffer-string))
+               ;; A data URI cannot carry the line breaks added by default.
+               t)))))
+
+(defun s3-publish--localize-images (html-file directory profile)
+  "Rewrite the local images in HTML-FILE so they work once published.
+Relative image links are resolved against DIRECTORY, the directory of
+the document's source.  See `s3-publish-html-local-images' for what is
+done to them; PROFILE gives the URL of an uploaded image.
+
+Returns the images to upload, as a list of (FILE . KEY)."
+  (let ((uploads nil))
+    (when s3-publish-html-local-images
+      (with-temp-buffer
+        (insert-file-contents html-file)
+        (goto-char (point-min))
+        (let ((modified nil)
+              (case-fold-search t))
+          (while (re-search-forward "<img[^>]*?[ \t\n]src=\"\\([^\"]*\\)\"" nil t)
+            (let* ((src (match-string 1))
+                   (file (s3-publish--local-image-file src directory)))
+              (cond
+               ((null file))
+               ((not (file-readable-p file))
+                (display-warning 's3-publish
+                                 (format "Cannot read image %s; left as is" file)))
+               (t
+                (let ((uri (and (eq s3-publish-html-local-images 'inline)
+                                (<= (file-attribute-size (file-attributes file))
+                                    s3-publish-html-inline-image-max-size)
+                                (s3-publish--file-data-uri file))))
+                  (unless uri
+                    (let ((key (s3-publish-get-file-key
+                                file (plist-get profile :salt))))
+                      (unless (assoc file uploads)
+                        (push (cons file key) uploads))
+                      (setq uri (s3-publish--object-url profile key))))
+                  (replace-match uri t t nil 1)
+                  (setq modified t))))))
+          (when modified
+            (write-region (point-min) (point-max) html-file nil 'quiet)))))
+    (nreverse uploads)))
 
 (defun s3-publish--export-buffer-to-html ()
   "Export the current Org buffer to HTML and return an absolute file name.
@@ -1836,6 +1960,15 @@ Code spans and backslash escapes are protected from the other passes."
         ;; 2. Images, links, autolinks.  Images first: ![alt](url) vs [t](url).
         (rewrite "!\\[\\([^][]*\\)\\]([ \t]*\\([^) \t]+\\)[^)]*)" "[[\\2]]")
         (rewrite "\\[\\([^][]*\\)\\]([ \t]*\\([^) \t]+\\)[^)]*)" "[[\\2][\\1]]")
+        ;; A target with no scheme is a relative file, but Org reads
+        ;; `[[shot.png]]' as a search for a heading of that name, which
+        ;; aborts the export.  Say it is a file.  `#anchor' stays as is.
+        (goto-char (point-min))
+        (while (re-search-forward "\\[\\[\\([^]\n]+\\)\\]" nil t)
+          (let ((target (match-string 1)))
+            (unless (string-match-p "\\`\\(?:#\\|[a-zA-Z][a-zA-Z0-9+.-]*:\\)"
+                                    target)
+              (replace-match (concat "file:" target) t t nil 1))))
         (rewrite "<\\(\\(?:https?\\|mailto\\):[^> \t]+\\)>" "[[\\1]]")
         ;; 3. Footnote references and definitions.
         (rewrite "^\\[\\^\\([^]]+\\)\\]:[ \t]*" "[fn:\\1] ")
