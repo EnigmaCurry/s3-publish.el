@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# A stand-in for s3cmd, for tests.  Objects live under $FAKE_S3_ROOT/BUCKET/KEY,
+# each with a KEY.args file holding the flags it was uploaded with.  Every
+# call is appended to $FAKE_S3_ROOT/log, along with whether the --config
+# file existed at the time.
+set -u
+root="${FAKE_S3_ROOT:?FAKE_S3_ROOT must be set}"
+mkdir -p "$root"
+config=""
+flags=()
+positional=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --config) config="$2"; shift 2 ;;
+        --*) flags+=("$1"); shift ;;
+        *) positional+=("$1"); shift ;;
+    esac
+done
+config_state=missing
+[ -n "$config" ] && [ -f "$config" ] && config_state=present
+echo "config=$config_state ${positional[*]} ${flags[*]-}" >> "$root/log"
+
+[ -n "${FAKE_S3_FAIL:-}" ] && { echo "ERROR: simulated failure" >&2; exit 1; }
+
+path_of() { local u="${1#s3://}"; echo "$root/objects/$u"; }
+cmd="${positional[0]:-}"
+case "$cmd" in
+    put)
+        dest="$(path_of "${positional[2]}")"
+        mkdir -p "$(dirname "$dest")"
+        cp "${positional[1]}" "$dest"
+        printf '%s\n' "${flags[@]-}" > "$dest.args"
+        echo "upload: '${positional[1]}' -> '${positional[2]}'"
+        ;;
+    get)
+        src="$(path_of "${positional[1]}")"
+        if [ -f "$src" ]; then
+            cp "$src" "${positional[2]}"
+        else
+            echo "ERROR: S3 error: 404 (Not Found)" >&2
+            exit 12
+        fi
+        ;;
+    del)
+        rm -f "$(path_of "${positional[1]}")" "$(path_of "${positional[1]}").args"
+        echo "delete: '${positional[1]}'"
+        ;;
+    signurl)
+        u="${positional[1]#s3://}"
+        echo "https://${u%%/*}.fake-endpoint/${u#*/}?Expires=${positional[2]}&Signature=fake"
+        ;;
+    *)
+        echo "fake s3cmd: unsupported command: $cmd" >&2
+        exit 2
+        ;;
+esac

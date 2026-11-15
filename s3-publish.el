@@ -22,6 +22,7 @@
 (require 'subr-x)
 (require 'dired)
 (require 'ox-html)
+(require 'url-parse)
 
 (defgroup s3-publish nil
   "Settings for publishing files to S3-compatible storage."
@@ -234,6 +235,91 @@ website_endpoint = http://%%(bucket)s.%s/
         (insert config-content))
       tmp-file)))
 
+;;; Running s3cmd -------------------------------------------------------------
+;; Every s3cmd call goes through `s3-publish--s3cmd', which writes the
+;; credentials config, runs the command, and deletes the config again, so
+;; secret keys never pile up in the temporary directory.
+
+(defcustom s3-publish-cache-control "no-cache"
+  "Cache-Control header sent with every object s3-publish uploads.
+
+The default, \"no-cache\", lets browsers and CDNs keep a copy but makes
+them check with the bucket before using it.  That costs one conditional
+request, and means a republished page, the HTML index and the RSS feed
+show their new contents straight away rather than whenever a cache
+expires.  Use e.g. \"max-age=300\" to trade freshness for fewer requests.
+
+nil sends no header, leaving caching to the provider's defaults."
+  :type '(choice (string :tag "Header value")
+                 (const :tag "No header" nil))
+  :group 's3-publish)
+
+(defun s3-publish--s3cmd (profile &rest args)
+  "Run s3cmd with ARGS using PROFILE's credentials.
+Returns (EXIT-CODE . OUTPUT), OUTPUT being stdout and stderr together.
+The config file holding the credentials is deleted before returning."
+  (let ((config (s3-publish-generate-s3cmd-config profile)))
+    (unwind-protect
+        (with-temp-buffer
+          (let ((exit-code (apply #'call-process "s3cmd" nil t nil
+                                  "--config" config args)))
+            (cons exit-code (buffer-string))))
+      (when (file-exists-p config)
+        (delete-file config)))))
+
+(defun s3-publish--s3cmd-or-error (profile what &rest args)
+  "Run s3cmd with ARGS using PROFILE's credentials, returning its output.
+Signals an error mentioning WHAT if s3cmd fails."
+  (let ((result (apply #'s3-publish--s3cmd profile args)))
+    (unless (zerop (car result))
+      (error "%s failed: %s" what (string-trim (cdr result))))
+    (cdr result)))
+
+(defun s3-publish--put (profile file key &optional mime-type temporary)
+  "Upload FILE to KEY in PROFILE's bucket, signalling an error on failure.
+MIME-TYPE, when non-nil, overrides s3cmd's guess.  TEMPORARY tags the
+object `temp=temp', the tag s3-publish gives published content (as
+opposed to the index and feed).  Applies the profile's ACL and
+`s3-publish-cache-control'."
+  (apply #'s3-publish--s3cmd-or-error profile (format "Upload of %s" key)
+         (append (and (plist-get profile :public-acl) (list "--acl-public"))
+                 (and mime-type (list (concat "--mime-type=" mime-type)))
+                 (and s3-publish-cache-control
+                      (list (concat "--add-header=Cache-Control: "
+                                    s3-publish-cache-control)))
+                 (and temporary (list "--add-header=x-amz-tagging: temp=temp"))
+                 (list "put" file
+                       (format "s3://%s/%s" (plist-get profile :bucket) key)))))
+
+(defun s3-publish--put-string (profile string key mime-type)
+  "Upload STRING as the object KEY in PROFILE's bucket, with MIME-TYPE."
+  (let ((file (make-temp-file "s3-publish-" nil
+                              (file-name-extension key t))))
+    (unwind-protect
+        (progn
+          (let ((coding-system-for-write 'utf-8))
+            (write-region string nil file nil 'quiet))
+          (s3-publish--put profile file key mime-type))
+      (delete-file file))))
+
+(defun s3-publish--get (profile key)
+  "Return the contents of KEY in PROFILE's bucket, or nil if it is missing."
+  (let ((file (make-temp-file "s3-publish-get-")))
+    (unwind-protect
+        (let ((result (s3-publish--s3cmd
+                       profile "get" "--force"
+                       (format "s3://%s/%s" (plist-get profile :bucket) key)
+                       file)))
+          (when (and (zerop (car result))
+                     (not (string-match-p "WARNING: Not Found" (cdr result)))
+                     (> (file-attribute-size (file-attributes file)) 0))
+            (with-temp-buffer
+              (let ((coding-system-for-read 'utf-8))
+                (insert-file-contents file))
+              (buffer-string))))
+      (when (file-exists-p file)
+        (delete-file file)))))
+
 
 ;; Add RSS feed support to profile settings
 (defcustom s3-publish-profiles nil
@@ -438,70 +524,22 @@ Generates a random salt (an 8-character string) and stores it with the profile."
   "Download the current RSS feed for PROFILE from S3.
 Returns the feed content as a string if successful,
 or nil if the feed doesn't exist yet."
-  (let* ((s3cmd-config (s3-publish-generate-s3cmd-config profile))
-         (bucket (plist-get profile :bucket))
-         (s3-uri (format "s3://%s/%s" bucket s3-publish-rss-filename))
-         (temp-file (make-temp-file "s3-publish-feed-" nil ".xml"))
-         (args (list "--config" s3cmd-config "get" s3-uri temp-file "--force"))
-         (output-buffer (generate-new-buffer "*s3-publish-download-feed*"))
-         (exit-code (apply 'call-process "s3cmd" nil output-buffer nil args))
-         content)
-
-    (unwind-protect
-        (progn
-          ;; Check both the exit code and if the file contains content
-          (if (and (zerop exit-code)
-                   (file-exists-p temp-file)
-                   (> (file-attribute-size (file-attributes temp-file)) 0)
-                   (not (with-current-buffer output-buffer
-                          (goto-char (point-min))
-                          (search-forward "WARNING: Not Found" nil t))))
-              (progn
-                (setq content (with-temp-buffer
-                                (insert-file-contents temp-file)
-                                (buffer-string)))
-                (message "Downloaded existing RSS feed from %s" s3-uri)
-                content)
-            (message "No existing RSS feed found at %s, will create new one" s3-uri)
-            nil))
-      (kill-buffer output-buffer)
-      (when (file-exists-p temp-file)
-        (delete-file temp-file)))))
+  (let ((content (s3-publish--get profile s3-publish-rss-filename)))
+    (if content
+        (message "Downloaded existing RSS feed")
+      (message "No existing RSS feed found, will create new one"))
+    content))
 
 ;; Similarly fix the HTML index download function
 (defun s3-publish-download-html-index (profile)
   "Download the current HTML index for PROFILE from S3.
 Returns the index content as a string if successful,
 or nil if the index doesn't exist yet."
-  (let* ((s3cmd-config (s3-publish-generate-s3cmd-config profile))
-         (bucket (plist-get profile :bucket))
-         (s3-uri (format "s3://%s/%s" bucket s3-publish-html-index-filename))
-         (temp-file (make-temp-file "s3-publish-index-" nil ".html"))
-         (args (list "--config" s3cmd-config "get" s3-uri temp-file "--force"))
-         (output-buffer (generate-new-buffer "*s3-publish-download-index*"))
-         (exit-code (apply 'call-process "s3cmd" nil output-buffer nil args))
-         content)
-
-    (unwind-protect
-        (progn
-          ;; Check both the exit code and if the file contains content
-          (if (and (zerop exit-code)
-                   (file-exists-p temp-file)
-                   (> (file-attribute-size (file-attributes temp-file)) 0)
-                   (not (with-current-buffer output-buffer
-                          (goto-char (point-min))
-                          (search-forward "WARNING: Not Found" nil t))))
-              (progn
-                (setq content (with-temp-buffer
-                                (insert-file-contents temp-file)
-                                (buffer-string)))
-                (message "Downloaded existing HTML index from %s" s3-uri)
-                content)
-            (message "No existing HTML index found at %s, will create new one" s3-uri)
-            nil))
-      (kill-buffer output-buffer)
-      (when (file-exists-p temp-file)
-        (delete-file temp-file)))))
+  (let ((content (s3-publish--get profile s3-publish-html-index-filename)))
+    (if content
+        (message "Downloaded existing HTML index")
+      (message "No existing HTML index found, will create new one"))
+    content))
 
 (defun s3-publish-create-new-rss-feed (profile)
   "Create a new RSS feed XML document for PROFILE."
@@ -587,63 +625,27 @@ or nil if the index doesn't exist yet."
   "Upload FILE to S3 using PROFILE.
 PROFILE is a plist that must include :bucket, :endpoint, and credentials
 (:access-key and :secret-key), and :salt.
-The file's key is generated using `s3-publish-get-file-key' with the profile's salt,
-and a temporary s3cmd config file is created using
-`s3-publish-generate-s3cmd-config'.
+The file's key is generated using `s3-publish-get-file-key' with the
+profile's salt.
 Optional TITLE and DESCRIPTION are used for RSS feed entries if the profile has
 RSS feed enabled. If not provided, they will be generated from the filename.
-The s3cmd command is run:
-  s3cmd --config TMP_CONFIG [--acl-public] put FILE s3://BUCKET/KEY
 If the upload is successful and the profile's :public-acl is non-nil,
 this function returns the public URL for the file (constructed as
   https://BUCKET.HOST_BASE/KEY).
 If :public-acl is nil, it returns the S3 URI (e.g., s3://BUCKET/KEY).
 If the upload fails, it signals an error with the error message."
-  (let* ((salt (plist-get profile :salt))
-         (key (s3-publish-get-file-key file salt))
-         (s3cmd-config (s3-publish-generate-s3cmd-config profile))
-         (bucket (plist-get profile :bucket))
-         (endpoint (plist-get profile :endpoint))
-         ;; Compute host-base: remove protocol and trailing slash.
-         (host-base (replace-regexp-in-string "^https?://" "" endpoint))
-         (host-base (replace-regexp-in-string "/$" "" host-base))
-         ;; Remove the bucket subdomain if it exactly matches.
-         (host-base (if (string-prefix-p (concat bucket ".") host-base)
-                        (replace-regexp-in-string
-                         (concat "^" (regexp-quote (concat bucket ".")))
-                         "" host-base)
-                      host-base))
-         (s3-uri (format "s3://%s/%s" bucket key))
-         ;; Conditionally include --acl-public if :public-acl is non-nil.
-         (acl-args (if (plist-get profile :public-acl)
-                       (list "--acl-public")
-                     nil))
-         (args (append (list "--config" s3cmd-config) acl-args
-                       (list "put" file s3-uri)
-                       (list "--add-header=x-amz-tagging: temp=temp")))
-         (output-buffer (generate-new-buffer "*s3-publish-upload-output*"))
-         exit-code)
-    (unwind-protect
-        (progn
-          (setq exit-code
-                (apply 'call-process "s3cmd" nil output-buffer nil args))
-          (if (zerop exit-code)
-              (let ((url (if (plist-get profile :public-acl)
-                            (format "https://%s.%s/%s" bucket host-base key)
-                          s3-uri)))
-                ;; Update RSS feed if enabled
-                (when (and (plist-get profile :rss-feed)
-                           (plist-get profile :public-acl))
-                  (let ((item-title (or title (file-name-nondirectory file)))
-                        (item-desc (or description
-                                       (format "File published on %s"
-                                              (format-time-string "%Y-%m-%d %H:%M")))))
-                    (s3-publish-update-feed profile url item-title item-desc)))
-                ;; Return the URL
-                url)
-            (with-current-buffer output-buffer
-              (error "Upload failed: %s" (buffer-string)))))
-      (kill-buffer output-buffer))))
+  (let* ((key (s3-publish-get-file-key file (plist-get profile :salt)))
+         (url (s3-publish--object-url profile key)))
+    (s3-publish--put profile file key nil t)
+    (when (and (plist-get profile :rss-feed)
+               (plist-get profile :public-acl))
+      (s3-publish-update-feed
+       profile url
+       (or title (file-name-nondirectory file))
+       (or description
+           (format "File published on %s"
+                   (format-time-string "%Y-%m-%d %H:%M")))))
+    url))
 
 ;;; HTML theme ----------------------------------------------------------------
 ;; Org's export stylesheet is deliberately minimal, so published documents
@@ -1478,24 +1480,8 @@ A public https URL when PROFILE has :public-acl, otherwise an s3:// URI."
   "Upload FILE to PROFILE's bucket under KEY without touching the RSS feed.
 MIME-TYPE, when non-nil, is passed to s3cmd as --mime-type.
 Returns the resulting URL (see `s3-publish--object-url')."
-  (let* ((s3cmd-config (s3-publish-generate-s3cmd-config profile))
-         (bucket (plist-get profile :bucket))
-         (s3-uri (format "s3://%s/%s" bucket key))
-         (acl-args (if (plist-get profile :public-acl) (list "--acl-public") nil))
-         (mime-args (if mime-type (list (concat "--mime-type=" mime-type)) nil))
-         (args (append (list "--config" s3cmd-config) acl-args mime-args
-                       (list "put" file s3-uri)
-                       (list "--add-header=x-amz-tagging: temp=temp")))
-         (output-buffer (generate-new-buffer "*s3-publish-upload-output*"))
-         exit-code)
-    (unwind-protect
-        (progn
-          (setq exit-code (apply 'call-process "s3cmd" nil output-buffer nil args))
-          (if (zerop exit-code)
-              (s3-publish--object-url profile key)
-            (with-current-buffer output-buffer
-              (error "Upload failed: %s" (buffer-string)))))
-      (kill-buffer output-buffer))))
+  (s3-publish--put profile file key mime-type t)
+  (s3-publish--object-url profile key))
 
 (defun s3-publish--publish-document (source-file export-fn title description source-label)
   "Publish SOURCE-FILE and an HTML rendering of it to S3.
@@ -2280,21 +2266,13 @@ to a published Org buffer."
 (defun s3-publish--delete-key (profile key &optional noerror)
   "Delete KEY from PROFILE's bucket, returning t on success.
 With NOERROR, return nil on failure instead of signalling an error."
-  (let* ((s3cmd-config (s3-publish-generate-s3cmd-config profile))
-         (bucket (plist-get profile :bucket))
-         (s3-uri (format "s3://%s/%s" bucket key))
-         (output-buffer (generate-new-buffer "*s3-publish-remove-output*"))
-         exit-code)
-    (unwind-protect
-        (progn
-          (setq exit-code (call-process "s3cmd" nil output-buffer nil
-                                        "--config" s3cmd-config "del" s3-uri))
-          (cond
-           ((zerop exit-code) t)
-           (noerror nil)
-           (t (with-current-buffer output-buffer
-                (error "Error removing file from S3: %s" (buffer-string))))))
-      (kill-buffer output-buffer))))
+  (let ((result (s3-publish--s3cmd
+                 profile "del"
+                 (format "s3://%s/%s" (plist-get profile :bucket) key))))
+    (cond
+     ((zerop (car result)) t)
+     (noerror nil)
+     (t (error "Error removing file from S3: %s" (string-trim (cdr result)))))))
 
 (defun s3-publish--remove-document-internal (file profile)
   "Remove FILE and its published .html companion from S3 using PROFILE.
@@ -2435,44 +2413,11 @@ If the index doesn't exist yet, offer to create it."
           (browse-url index-url)
         ;; If index doesn't exist yet, offer to create it
         (when (y-or-n-p "HTML index doesn't exist yet. Create a new empty index? ")
-          ;; Create and upload a new empty index
-          (let* ((new-index (s3-publish-create-new-html-index profile))
-                 (index-temp-file (make-temp-file "s3-publish-index-" nil ".html")))
-            (unwind-protect
-                (progn
-                  ;; Write index to temp file
-                  (with-temp-file index-temp-file (insert new-index))
-
-                  ;; Upload the index to S3
-                  (let* ((s3cmd-config (s3-publish-generate-s3cmd-config profile))
-                         (bucket (plist-get profile :bucket))
-                         (index-s3-uri (format "s3://%s/%s" bucket s3-publish-html-index-filename))
-                         (acl-args (if (plist-get profile :public-acl)
-                                      (list "--acl-public")
-                                    nil))
-                         (index-args (append (list "--config" s3cmd-config)
-                                            acl-args
-                                            (list "put" index-temp-file index-s3-uri)
-                                            (list "--mime-type=text/html")))
-                         (output-buffer (generate-new-buffer "*s3-publish-upload-index*"))
-                         index-exit-code)
-
-                    (unwind-protect
-                        (progn
-                          ;; Upload the HTML index
-                          (setq index-exit-code
-                                (apply 'call-process "s3cmd" nil output-buffer nil index-args))
-                          (if (zerop index-exit-code)
-                              (progn
-                                (message "Created new HTML index for %s" profile-name)
-                                (browse-url index-url))
-                            (with-current-buffer output-buffer
-                              (error "Failed to upload HTML index: %s" (buffer-string)))))
-                      (kill-buffer output-buffer))))
-
-              ;; Clean up temp files
-              (when (file-exists-p index-temp-file)
-                (delete-file index-temp-file)))))))))
+          (s3-publish--put-string profile
+                                  (s3-publish-create-new-html-index profile)
+                                  s3-publish-html-index-filename "text/html")
+          (message "Created new HTML index for %s" profile-name)
+          (browse-url index-url))))))
 
 (defun s3-publish-bucket-lifecycle (profile-name days-input)
   "Set or delete the S3 lifecycle expiration policy for the bucket PROFILE-NAME.
@@ -2487,35 +2432,24 @@ Prompts to use alternative credentials since this operation requires elevated pr
                      (read-string
                       "Enter number of expiry days (leave blank to delete policy): ")))
   (let* ((base-profile (s3-publish-get-profile profile-name))
-         (profile 
+         (profile
           (if (y-or-n-p "Lifecycle operations require admin privileges. Use alternative credentials? ")
               (s3-publish-select-credentials base-profile)
             (s3-publish-get-credentials base-profile)))
          (bucket (plist-get profile :bucket)))
     (unless bucket
       (error "No bucket defined for profile %s" profile-name))
-    (let* ((s3cmd-config (s3-publish-generate-s3cmd-config profile))
-           (command (if (string= days-input "")
-                        "dellifecycle"
-                      "expire"))
-           (args (if (string= days-input "")
-                     (list "--config" s3cmd-config (format "s3://%s" bucket))
-                   (list "--config" s3cmd-config
-                         (format "--expiry-days=%s" days-input)
-                         (format "s3://%s" bucket))))
-           (output-buffer (generate-new-buffer "*s3cmd-output*"))
-           (exit-code (apply 'call-process "s3cmd" nil output-buffer nil
-                             (cons command args))))
-      (unwind-protect
-          (if (zerop exit-code)
-              (if (string= days-input "")
-                  (message "Lifecycle policy deleted for bucket %s." bucket)
-                (message
-                 "Lifecycle policy set for bucket %s: objects expire after %s days"
-                 bucket days-input))
-            (with-current-buffer output-buffer
-              (error "Error updating lifecycle policy: %s" (buffer-string))))
-        (kill-buffer output-buffer)))))
+    (if (string= days-input "")
+        (progn
+          (s3-publish--s3cmd-or-error profile "Deleting the lifecycle policy"
+                                      "dellifecycle" (format "s3://%s" bucket))
+          (message "Lifecycle policy deleted for bucket %s." bucket))
+      (s3-publish--s3cmd-or-error profile "Setting the lifecycle policy"
+                                  "expire"
+                                  (format "--expiry-days=%s" days-input)
+                                  (format "s3://%s" bucket))
+      (message "Lifecycle policy set for bucket %s: objects expire after %s days"
+               bucket days-input))))
 
 (defun s3-publish-upload-multiple-files (files profile)
   "Upload multiple FILES to S3 using PROFILE.
@@ -2672,63 +2606,19 @@ Returns t if successful, nil if no modification was needed."
           (if (or feed-modified index-modified)
               (progn
                 (message "Feeds modified, uploading updates...")
-                ;; Save the updated feeds to temp files
-                (let ((feed-temp-file (when feed-modified
-                                        (make-temp-file "s3-publish-feed-" nil ".xml")))
-                      (index-temp-file (when index-modified
-                                         (make-temp-file "s3-publish-index-" nil ".html"))))
-                  (unwind-protect
-                      (progn
-                        ;; Write feeds to temp files
-                        (when feed-modified
-                          (with-temp-file feed-temp-file
-                            (insert new-feed)))
-                        (when index-modified
-                          (with-temp-file index-temp-file
-                            (insert new-index)))
-                        ;; Upload the feeds to S3
-                        (let* ((s3cmd-config (s3-publish-generate-s3cmd-config profile))
-                               (bucket (plist-get profile :bucket))
-                               (acl-args (if (plist-get profile :public-acl)
-                                             (list "--acl-public")
-                                           nil))
-                               (output-buffer (generate-new-buffer "*s3-publish-upload-feed*")))
-                          (unwind-protect
-                              (progn
-                                ;; Upload the RSS feed if we modified it
-                                (when feed-modified
-                                  (let* ((feed-s3-uri (format "s3://%s/%s" bucket s3-publish-rss-filename))
-                                         (feed-args (append (list "--config" s3cmd-config)
-                                                           acl-args
-                                                           (list "put" feed-temp-file feed-s3-uri)
-                                                           (list "--mime-type=application/rss+xml")))
-                                         (feed-exit-code (apply 'call-process "s3cmd" nil output-buffer nil feed-args)))
-                                    (if (zerop feed-exit-code)
-                                        (progn
-                                          (message "Updated RSS feed for %s - removed entry" (plist-get profile :name))
-                                          (setq any-updates t))
-                                      (with-current-buffer output-buffer
-                                        (error "Failed to upload updated RSS feed: %s" (buffer-string))))))
-                                ;; Upload the HTML index if we modified it
-                                (when index-modified
-                                  (let* ((index-s3-uri (format "s3://%s/%s" bucket s3-publish-html-index-filename))
-                                         (index-args (append (list "--config" s3cmd-config)
-                                                            acl-args
-                                                            (list "put" index-temp-file index-s3-uri)
-                                                            (list "--mime-type=text/html")))
-                                         (index-exit-code (apply 'call-process "s3cmd" nil output-buffer nil index-args)))
-                                    (if (zerop index-exit-code)
-                                        (progn
-                                          (message "Updated HTML index for %s - removed entry" (plist-get profile :name))
-                                          (setq any-updates t))
-                                      (with-current-buffer output-buffer
-                                        (error "Failed to upload updated HTML index: %s" (buffer-string)))))))
-                            (kill-buffer output-buffer))))
-                    ;; Clean up temp files
-                    (when (and feed-temp-file (file-exists-p feed-temp-file))
-                      (delete-file feed-temp-file))
-                    (when (and index-temp-file (file-exists-p index-temp-file))
-                      (delete-file index-temp-file)))))
+                (when feed-modified
+                  (s3-publish--put-string profile new-feed s3-publish-rss-filename
+                                          "application/rss+xml")
+                  (message "Updated RSS feed for %s - removed entry"
+                           (plist-get profile :name))
+                  (setq any-updates t))
+                (when index-modified
+                  (s3-publish--put-string profile new-index
+                                          s3-publish-html-index-filename
+                                          "text/html")
+                  (message "Updated HTML index for %s - removed entry"
+                           (plist-get profile :name))
+                  (setq any-updates t)))
             ;; If we didn't modify anything, tell the user
             (message "URL %s not found in any feeds - nothing to update" file-url)))))
     ;; Return whether we updated anything
@@ -2738,48 +2628,57 @@ Returns t if successful, nil if no modification was needed."
   "Remove FILE from S3 using PROFILE without prompting.
 PROFILE is a plist that must include :bucket, :endpoint, :salt,
 and credentials (:access-key and :secret-key).
-This function generates FILE's S3 key using
-`s3-publish-get-file-key' with PROFILE's salt,
-creates a temporary s3cmd config file, and runs:
-  s3cmd --config CONFIG del s3://BUCKET/KEY
-Returns the S3 URI if successful,
-or signals an error with the output from s3cmd."
-  (let* ((salt (plist-get profile :salt))
-         (key (s3-publish-get-file-key file salt))
+FILE's key is generated using `s3-publish-get-file-key' with PROFILE's
+salt.  The RSS feed and HTML index entries are dropped too.
+Returns the S3 URI if successful, or signals an error."
+  (let* ((key (s3-publish-get-file-key file (plist-get profile :salt)))
+         (s3-uri (format "s3://%s/%s" (plist-get profile :bucket) key)))
+    (s3-publish--delete-key profile key)
+    (when (and (plist-get profile :rss-feed)
+               (plist-get profile :public-acl))
+      (s3-publish-remove-from-feed profile (s3-publish--object-url profile key)))
+    (message "Successfully removed %s from S3" s3-uri)
+    s3-uri))
+
+(defun s3-publish--url-key (profile url)
+  "Return the object key that URL names in PROFILE's bucket.
+URL is a public https://BUCKET.HOST/KEY URL or an s3://BUCKET/KEY URI.
+Signals an error when URL does not belong to PROFILE's bucket."
+  (let* ((url (string-trim url))
          (bucket (plist-get profile :bucket))
-         (s3-uri (format "s3://%s/%s" bucket key))
-         (endpoint (plist-get profile :endpoint))
-         ;; Compute host-base: remove protocol and trailing slash.
-         (host-base (replace-regexp-in-string "^https?://" "" endpoint))
-         (host-base (replace-regexp-in-string "/$" "" host-base))
-         ;; Remove the bucket subdomain if it exactly matches.
-         (host-base (if (string-prefix-p (concat bucket ".") host-base)
-                        (replace-regexp-in-string
-                         (concat "^" (regexp-quote (concat bucket ".")))
-                         "" host-base)
-                      host-base))
-         (file-url (if (plist-get profile :public-acl)
-                       (format "https://%s.%s/%s" bucket host-base key)
-                     s3-uri))
-         (s3cmd-config (s3-publish-generate-s3cmd-config profile))
-         (args (list "--config" s3cmd-config "del" s3-uri))
-         (output-buffer (generate-new-buffer "*s3-publish-remove-output*"))
-         exit-code)
-    (unwind-protect
-        (progn
-          (setq exit-code
-                (apply 'call-process "s3cmd" nil output-buffer nil args))
-          (if (zerop exit-code)
-              (progn
-                ;; Update RSS feed if enabled
-                (when (and (plist-get profile :rss-feed)
-                           (plist-get profile :public-acl))
-                  (s3-publish-remove-from-feed profile file-url))
-                (message "Successfully removed %s from S3" s3-uri)
-                s3-uri)
-            (with-current-buffer output-buffer
-              (error "Error removing file from S3: %s" (buffer-string)))))
-      (kill-buffer output-buffer))))
+         (parsed (url-generic-parse-url url))
+         (host (or (url-host parsed) ""))
+         (path (car (url-path-and-query parsed)))
+         (key (and path (> (length path) 1) (substring path 1))))
+    (cond
+     ((string= (url-type parsed) "s3")
+      (unless (string= host bucket)
+        (error "Bucket mismatch: URL bucket '%s' does not match profile bucket '%s'"
+               host bucket)))
+     ((not (string-match "\\`\\([^.]+\\)\\.\\(.+\\)\\'" host))
+      (error "Cannot parse bucket from URL: %s" url))
+     ((not (string= (match-string 1 host) bucket))
+      (error "Bucket mismatch: URL bucket '%s' does not match profile bucket '%s'"
+             (match-string 1 host) bucket))
+     ((not (string= (match-string 2 host) (s3-publish--host-base profile)))
+      (error "Host mismatch: URL host '%s' does not match profile endpoint '%s'"
+             host (s3-publish--host-base profile))))
+    (unless key
+      (error "No S3 key found in URL: %s" url))
+    key))
+
+(defun s3-publish--remove-url (profile url)
+  "Delete the object at URL from PROFILE's bucket, and its feed entry.
+Returns the S3 URI of the deleted object."
+  (let* ((key (s3-publish--url-key profile url))
+         (s3-uri (format "s3://%s/%s" (plist-get profile :bucket) key)))
+    (when (and (plist-get profile :rss-feed)
+               (plist-get profile :public-acl))
+      (when (s3-publish-remove-from-feed profile (string-trim url))
+        (message "Updated feed to remove entry for %s" url)))
+    (s3-publish--delete-key profile key)
+    (message "Successfully removed %s" s3-uri)
+    s3-uri))
 
 (defun s3-publish-remove-urls (urls-string)
   "Remove multiple files from S3 given their public URLs.
@@ -2787,86 +2686,24 @@ URLS-STRING is a string with one URL per line.
 Prompts for an S3 profile, then for each URL:
   - Parses the URL to extract the bucket and key.
   - Validates that the URL's bucket and host match the selected profile.
-  - Constructs the S3 URI and invokes s3cmd to remove the object.
+  - Removes the object.
   - Updates the RSS feed and HTML index if the profile has RSS enabled.
 At the end, prints how many objects were deleted."
   (interactive "sS3 URLs to remove (one per line): ")
   (let* ((lines (split-string urls-string "\n" t "[ \t\n]+"))
          (profile-name (s3-publish--read-profile-name))
          (profile
-          (s3-publish-get-credentials (s3-publish-get-profile profile-name)))
-         (profile-bucket (plist-get profile :bucket))
-         (endpoint (plist-get profile :endpoint)))
-    (unless (and profile-bucket endpoint)
+          (s3-publish-get-credentials (s3-publish-get-profile profile-name))))
+    (unless (and (plist-get profile :bucket) (plist-get profile :endpoint))
       (error "Profile '%s' must have both :bucket and :endpoint defined"
              profile-name))
-    (let ((results
-           (mapcar
-            (lambda (url)
-              (let* ((url (string-trim url))
-                     (parsed (url-generic-parse-url url))
-                     (url-host (url-host parsed))
-                     (url-path (url-filename parsed))
-                     ;; Expect host format: "BUCKET.host-base"
-                     (host-parts (and url-host (split-string url-host "\\.")))
-                     (url-bucket (if (and host-parts (car host-parts))
-                                     (car host-parts)
-                                   (error "Cannot parse bucket from URL: %s" url)))
-                     (url-host-base (if (cdr host-parts)
-                                        (mapconcat 'identity (cdr host-parts) ".")
-                                      (error "Cannot parse host base from URL: %s" url)))
-                     (key (if (> (length url-path) 1)
-                              (substring url-path 1)
-                            (error "No S3 key found in URL: %s" url)))
-                     ;; Normalize the endpoint's host base.
-                     (profile-host-base
-                      (replace-regexp-in-string "^https?://" "" endpoint))
-                     (profile-host-base
-                      (replace-regexp-in-string "/$" "" profile-host-base))
-                     (profile-host-base
-                      (if (string-prefix-p
-                           (concat profile-bucket ".") profile-host-base)
-                          (replace-regexp-in-string
-                           (concat "^"
-                                   (regexp-quote (concat profile-bucket ".")))
-                           "" profile-host-base)
-                        profile-host-base)))
-                ;; Verify that the URL's bucket matches the profile's bucket.
-                (unless (string= profile-bucket url-bucket)
-                  (error "Bucket mismatch: URL bucket '%s' does not match profile bucket '%s'"
-                         url-bucket profile-bucket))
-                ;; Verify that the URL's computed host base.
-                (unless (string= profile-host-base url-host-base)
-                  (error "Host mismatch: URL host '%s' does not match profile endpoint '%s'"
-                         url-host profile-host-base))
-                ;; First, update the feed if enabled
-                (when (and (plist-get profile :rss-feed)
-                           (plist-get profile :public-acl))
-                  (let ((feed-updated (s3-publish-remove-from-feed profile url)))
-                    (when feed-updated
-                      (message "Updated feed to remove entry for %s" url))))
-                ;; Then, construct the S3 URI and remove the file
-                (let* ((s3-uri (format "s3://%s/%s" profile-bucket key))
-                       (s3cmd-config (s3-publish-generate-s3cmd-config profile))
-                       (args (list "--config" s3cmd-config "del" s3-uri))
-                       (output-buffer
-                        (generate-new-buffer "*s3-publish-remove-urls-output*"))
-                       exit-code)
-                  (unwind-protect
-                      (progn
-                        (setq exit-code
-                              (apply 'call-process "s3cmd"
-                                     nil output-buffer nil args))
-                        (if (zerop exit-code)
-                            (progn
-                              (message "Successfully removed %s" s3-uri)
-                              t)
-                          (with-current-buffer output-buffer
-                            (error "Error removing %s: %s" s3-uri (buffer-string)))))
-                    (kill-buffer output-buffer)))))
-            lines)))
-      (message "Deleted %d object(s) from S3" (length results))
-      (length results))))
+    ;; Check every URL before deleting any, so one bad URL deletes nothing.
+    (dolist (url lines)
+      (s3-publish--url-key profile url))
+    (dolist (url lines)
+      (s3-publish--remove-url profile url))
+    (message "Deleted %d object(s) from S3" (length lines))
+    (length lines)))
 
 
 (defun s3-publish-remove-file (file)
@@ -3236,59 +3073,12 @@ they will be updated rather than duplicated."
                        (insert "\n" new-html-item)))
                    (buffer-string))))))
 
-        ;; Save the updated feed and index to temp files
-        (let ((feed-temp-file (make-temp-file "s3-publish-feed-" nil ".xml"))
-              (index-temp-file (make-temp-file "s3-publish-index-" nil ".html")))
-          (unwind-protect
-              (progn
-                ;; Write feed and index to temp files
-                (with-temp-file feed-temp-file (insert new-feed))
-                (with-temp-file index-temp-file (insert new-index))
-
-                ;; Upload the feed to S3
-                (let* ((s3cmd-config (s3-publish-generate-s3cmd-config profile))
-                       (bucket (plist-get profile :bucket))
-                       (feed-s3-uri (format "s3://%s/%s" bucket s3-publish-rss-filename))
-                       (index-s3-uri (format "s3://%s/%s" bucket s3-publish-html-index-filename))
-                       (acl-args (if (plist-get profile :public-acl)
-                                     (list "--acl-public")
-                                   nil))
-                       (feed-args (append (list "--config" s3cmd-config)
-                                          acl-args
-                                          (list "put" feed-temp-file feed-s3-uri)
-                                          (list "--mime-type=application/rss+xml")))
-                       (index-args (append (list "--config" s3cmd-config)
-                                           acl-args
-                                           (list "put" index-temp-file index-s3-uri)
-                                           (list "--mime-type=text/html")))
-                       (output-buffer (generate-new-buffer "*s3-publish-upload-feed*"))
-                       feed-exit-code
-                       index-exit-code)
-
-                  (unwind-protect
-                      (progn
-                        ;; Upload the RSS feed
-                        (setq feed-exit-code
-                              (apply 'call-process "s3cmd" nil output-buffer nil feed-args))
-                        (unless (zerop feed-exit-code)
-                          (with-current-buffer output-buffer
-                            (error "Failed to upload RSS feed: %s" (buffer-string))))
-
-                        ;; Upload the HTML index
-                        (setq index-exit-code
-                              (apply 'call-process "s3cmd" nil output-buffer nil index-args))
-                        (unless (zerop index-exit-code)
-                          (with-current-buffer output-buffer
-                            (error "Failed to upload HTML index: %s" (buffer-string))))
-
-                        (message "Updated RSS feed and HTML index for %s" (plist-get profile :name)))
-                    (kill-buffer output-buffer))))
-
-            ;; Clean up temp files
-            (when (file-exists-p feed-temp-file)
-              (delete-file feed-temp-file))
-            (when (file-exists-p index-temp-file)
-              (delete-file index-temp-file))))))))
+        (s3-publish--put-string profile new-feed s3-publish-rss-filename
+                                "application/rss+xml")
+        (s3-publish--put-string profile new-index s3-publish-html-index-filename
+                                "text/html")
+        (message "Updated RSS feed and HTML index for %s"
+                 (plist-get profile :name))))))
 
 (defun s3-publish-s3fs-mount (profile-name mountpoint)
   "Mount the S3 bucket from PROFILE-NAME at MOUNTPOINT using s3fs.

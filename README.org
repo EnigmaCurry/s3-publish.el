@@ -515,6 +515,13 @@ it will keep the same key/URL. However, there are two exceptions:
 Both of these create temporary files with random names in order to
 export them. Therefore these will always make new S3 keys.
 
+Every upload is sent with a =Cache-Control: no-cache= header, so
+browsers and CDNs check with the bucket before reusing a cached copy.
+A republished page, the HTML index and the RSS feed therefore show
+their new contents straight away. Set =s3-publish-cache-control= to
+another value (e.g. ="max-age=300"=) to cache longer, or to =nil= to
+send no header at all.
+
 ** Removing URLs
 
 You can remove the objects by supplying the URLs:

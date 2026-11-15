@@ -1,0 +1,200 @@
+;;; test-s3-publish-network.el --- s3-publish against a fake s3cmd  -*- lexical-binding: t; -*-
+
+;; These tests run the real publishing commands, with `test/bin/s3cmd'
+;; standing in for s3cmd.  It keeps objects in a temporary directory, so
+;; what was uploaded, with which flags, can be checked afterwards.
+
+(require 'ert)
+(require 'cl-lib)
+(require 's3-publish)
+
+(defconst test-s3-publish--bin
+  (expand-file-name "bin" (file-name-directory
+                           (or load-file-name buffer-file-name)))
+  "Directory holding the fake s3cmd.")
+
+(defvar test-s3-publish--root nil
+  "The fake bucket store of the test currently running.")
+
+(defconst test-s3-publish--profile
+  '(:name "test" :endpoint "fake-endpoint" :bucket "bkt" :public-acl t
+          :salt "salt" :rss-feed t :rss-title "T" :rss-desc "D"
+          :rss-link "https://bkt.fake-endpoint")
+  "The profile the network tests publish with.")
+
+(defmacro test-s3-publish-with-fake-s3 (&rest body)
+  "Run BODY with s3cmd replaced by the fake and one profile, \"test\"."
+  (declare (indent 0) (debug t))
+  `(let* ((test-s3-publish--root (make-temp-file "fake-s3-" t))
+          (exec-path (cons test-s3-publish--bin exec-path))
+          (process-environment
+           (append (list (concat "PATH=" test-s3-publish--bin ":"
+                                 (getenv "PATH"))
+                         (concat "FAKE_S3_ROOT=" test-s3-publish--root))
+                   process-environment))
+          (s3-publish-profiles (list test-s3-publish--profile))
+          (s3-publish-async nil)
+          (kill-ring nil))
+     (cl-letf (((symbol-function 's3-publish--read-profile-name)
+                (lambda () "test"))
+               ((symbol-function 's3-publish-get-credentials)
+                (lambda (profile)
+                  (append profile (list :access-key "AK" :secret-key "SK")))))
+       (unwind-protect (progn ,@body)
+         (delete-directory test-s3-publish--root t)))))
+
+(defun test-s3-publish--object (key)
+  "Return the contents of KEY in the fake bucket, or nil."
+  (let ((file (expand-file-name (concat "objects/bkt/" key)
+                                test-s3-publish--root)))
+    (when (file-exists-p file)
+      (with-temp-buffer
+        (insert-file-contents file)
+        (buffer-string)))))
+
+(defun test-s3-publish--object-flags (key)
+  "Return the s3cmd flags KEY was uploaded with, as a list of strings."
+  (split-string (or (test-s3-publish--object (concat key ".args")) "") "\n" t))
+
+(defun test-s3-publish--log ()
+  "Return the fake s3cmd's call log as a list of lines."
+  (let ((file (expand-file-name "log" test-s3-publish--root)))
+    (and (file-exists-p file)
+         (with-temp-buffer
+           (insert-file-contents file)
+           (split-string (buffer-string) "\n" t)))))
+
+(defun test-s3-publish--key (file &optional ext)
+  "Return the key FILE publishes to, with its extension replaced by EXT."
+  (let ((key (s3-publish-get-file-key file "salt")))
+    (if ext (concat (file-name-sans-extension key) ext) key)))
+
+(defmacro test-s3-publish-with-file (var name contents &rest body)
+  "Bind VAR to a file called NAME holding CONTENTS in a temp dir, run BODY."
+  (declare (indent 3) (debug t))
+  (let ((dir (make-symbol "dir")))
+    `(let* ((,dir (make-temp-file "s3-publish-src-" t))
+            (,var (expand-file-name ,name ,dir)))
+       (unwind-protect
+           (progn
+             (with-temp-file ,var (insert ,contents))
+             ,@body)
+         (delete-directory ,dir t)))))
+
+
+;;; s3cmd plumbing
+
+(ert-deftest s3-publish-test-net-buffer-upload ()
+  "Publishing a buffer uploads it, lists it, and returns its URL."
+  (test-s3-publish-with-fake-s3
+    (test-s3-publish-with-file file "notes.txt" "hello"
+      (with-current-buffer (find-file-noselect file)
+        (unwind-protect
+            (let ((url (s3-publish-buffer)))
+              (should (string-prefix-p "https://bkt.fake-endpoint/" url))
+              (should (equal (car kill-ring) url))
+              (should (equal (test-s3-publish--object
+                              (file-name-nondirectory url))
+                             "hello"))
+              (should (string-match-p (regexp-quote url)
+                                      (test-s3-publish--object "index.xml")))
+              (should (string-match-p (regexp-quote url)
+                                      (test-s3-publish--object "index.html"))))
+          (kill-buffer))))))
+
+(ert-deftest s3-publish-test-net-config-is-deleted ()
+  "The s3cmd config, which holds the secret key, is gone after each call."
+  (test-s3-publish-with-fake-s3
+    (let ((before (directory-files temporary-file-directory nil
+                                   "\\`s3cmd-config-")))
+      (should (zerop (car (s3-publish--s3cmd
+                           (s3-publish-get-credentials test-s3-publish--profile)
+                           "del" "s3://bkt/x"))))
+      ;; The config existed while s3cmd ran...
+      (should (string-prefix-p "config=present" (car (test-s3-publish--log))))
+      ;; ...and not afterwards.
+      (should (equal before (directory-files temporary-file-directory nil
+                                             "\\`s3cmd-config-"))))))
+
+(ert-deftest s3-publish-test-net-cache-control-header ()
+  "Uploads carry `s3-publish-cache-control', and none when it is nil."
+  (test-s3-publish-with-fake-s3
+    (let ((profile (s3-publish-get-credentials test-s3-publish--profile)))
+      (test-s3-publish-with-file file "a.txt" "a"
+        (s3-publish--put profile file "a.txt")
+        (should (member "--add-header=Cache-Control: no-cache"
+                        (test-s3-publish--object-flags "a.txt")))
+        (let ((s3-publish-cache-control "max-age=60"))
+          (s3-publish--put profile file "b.txt"))
+        (should (member "--add-header=Cache-Control: max-age=60"
+                        (test-s3-publish--object-flags "b.txt")))
+        (let ((s3-publish-cache-control nil))
+          (s3-publish--put profile file "c.txt"))
+        (should-not (seq-find (lambda (f) (string-match-p "Cache-Control" f))
+                              (test-s3-publish--object-flags "c.txt")))))))
+
+(ert-deftest s3-publish-test-net-failure-is-an-error ()
+  "A failing s3cmd signals an error carrying its output."
+  (test-s3-publish-with-fake-s3
+    (let ((process-environment (cons "FAKE_S3_FAIL=1" process-environment)))
+      (test-s3-publish-with-file file "a.txt" "a"
+        (let ((err (should-error
+                    (s3-publish--put
+                     (s3-publish-get-credentials test-s3-publish--profile)
+                     file "a.txt"))))
+          (should (string-match-p "simulated failure" (cadr err))))))))
+
+(ert-deftest s3-publish-test-net-get-missing-is-nil ()
+  "Fetching a missing object returns nil rather than signalling."
+  (test-s3-publish-with-fake-s3
+    (should-not (s3-publish--get
+                 (s3-publish-get-credentials test-s3-publish--profile)
+                 "nope.txt"))))
+
+(ert-deftest s3-publish-test-net-remove-url ()
+  "Removing by URL deletes the object and drops it from the listings."
+  (test-s3-publish-with-fake-s3
+    (test-s3-publish-with-file file "a.txt" "a"
+      (let* ((profile (s3-publish-get-credentials test-s3-publish--profile))
+             (url (s3-publish-upload-file file profile "A" "desc")))
+        (should (test-s3-publish--object (test-s3-publish--key file)))
+        (s3-publish-remove-urls url)
+        (should-not (test-s3-publish--object (test-s3-publish--key file)))
+        (should-not (string-match-p (regexp-quote url)
+                                    (test-s3-publish--object "index.xml")))))))
+
+(ert-deftest s3-publish-test-net-remove-url-rejects-other-buckets ()
+  "A URL from another bucket is refused before anything is deleted."
+  (test-s3-publish-with-fake-s3
+    (should-error (s3-publish-remove-urls
+                   "https://other.fake-endpoint/a.txt"))
+    (should-not (test-s3-publish--log))))
+
+(ert-deftest s3-publish-test-net-url-key ()
+  "Keys are recovered from both public URLs and s3:// URIs."
+  (let ((profile test-s3-publish--profile))
+    (should (equal (s3-publish--url-key profile "https://bkt.fake-endpoint/a/b.txt")
+                   "a/b.txt"))
+    (should (equal (s3-publish--url-key profile "s3://bkt/k.html") "k.html"))
+    (should-error (s3-publish--url-key profile "s3://other/k.html"))
+    (should-error (s3-publish--url-key profile "https://bkt.elsewhere/k"))))
+
+(ert-deftest s3-publish-test-net-org-document ()
+  "An Org buffer publishes its source and HTML, listed once in the feed."
+  (test-s3-publish-with-fake-s3
+    (test-s3-publish-with-file file "doc.org" "#+TITLE: Doc\n\nHello.\n"
+      (with-current-buffer (find-file-noselect file)
+        (unwind-protect
+            (let ((url (s3-publish-org-buffer)))
+              (should (equal url (concat "https://bkt.fake-endpoint/"
+                                         (test-s3-publish--key file ".html"))))
+              (should (string-match-p "Hello"
+                                      (test-s3-publish--object
+                                       (test-s3-publish--key file ".html"))))
+              (should (equal (test-s3-publish--object (test-s3-publish--key file))
+                             "#+TITLE: Doc\n\nHello.\n"))
+              (should (string-match-p "<title>Doc</title>"
+                                      (test-s3-publish--object "index.xml"))))
+          (kill-buffer))))))
+
+(provide 'test-s3-publish-network)
