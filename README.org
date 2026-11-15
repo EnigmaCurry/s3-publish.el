@@ -329,6 +329,27 @@ cannot be read (with a warning).
   (setq s3-publish-html-local-images nil)
 #+end_src
 
+*** Republish on save
+
+=M-x s3-publish-on-save-mode= turns a buffer into a live document: it
+asks once which profile to publish to, and from then on every save
+republishes the buffer without asking. Org and Markdown buffers publish
+as documents; any other file is uploaded as itself. A file's URL comes
+from its path, so it never changes -- a page you have shared keeps
+showing your latest save. With background uploads (the default),
+saving does not wait for the upload.
+
+Turning the mode on publishes nothing until the next save. Publishing
+on save never tangles an Org buffer. A file can turn the mode on for
+itself, with its profile, in its local variables:
+
+#+begin_src org
+  # Local Variables:
+  # s3-publish-on-save-profile: "default"
+  # mode: s3-publish-on-save
+  # End:
+#+end_src
+
 *** Theming the published HTML
 :PROPERTIES:
 :CUSTOM_ID: html-theme

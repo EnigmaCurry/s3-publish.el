@@ -403,4 +403,88 @@
         (should (equal (test-s3-publish--object "b.txt") "new"))
         (should (= 2 (length (test-s3-publish--log))))))))
 
+;;; Republishing on save
+
+(defmacro test-s3-publish-with-on-save (var name contents &rest body)
+  "Visit a file NAME holding CONTENTS with `s3-publish-on-save-mode' on.
+VAR is bound to the file.  After the mode is on, asking for a profile is
+an error, since saving must not prompt."
+  (declare (indent 3) (debug t))
+  `(test-s3-publish-with-file ,var ,name ,contents
+     (with-current-buffer (find-file-noselect ,var)
+       (unwind-protect
+           (progn
+             (s3-publish-on-save-mode 1)
+             (should (equal s3-publish-on-save-profile "test"))
+             (cl-letf (((symbol-function 's3-publish--read-profile-name)
+                        (lambda () (error "Prompted for a profile"))))
+               ,@body))
+         (set-buffer-modified-p nil)
+         (kill-buffer)))))
+
+(defun test-s3-publish--edit-and-save (text)
+  "Replace the current buffer's text with TEXT and save it."
+  (erase-buffer)
+  (insert text)
+  (let ((inhibit-message t)
+        (require-final-newline nil))
+    (save-buffer)))
+
+(ert-deftest s3-publish-test-on-save-org ()
+  "Saving an Org buffer in the mode republishes it, without asking."
+  (test-s3-publish-with-fake-s3
+    (test-s3-publish-with-on-save file "doc.org" "#+TITLE: Doc\n"
+      (should-not (test-s3-publish--object "index.xml"))
+      (test-s3-publish--edit-and-save "#+TITLE: Doc\n\nFirst.\n")
+      (should (string-match-p "First" (test-s3-publish--object
+                                        (test-s3-publish--key file ".html"))))
+      (test-s3-publish--edit-and-save "#+TITLE: Doc\n\nSecond.\n")
+      (should (string-match-p "Second" (test-s3-publish--object
+                                         (test-s3-publish--key file ".html")))))))
+
+(ert-deftest s3-publish-test-on-save-plain-file-keeps-its-url ()
+  "A plain file is published as itself, so every save has the same URL."
+  (test-s3-publish-with-fake-s3
+    (test-s3-publish-with-on-save file "notes.txt" "one"
+      (test-s3-publish--edit-and-save "two")
+      (should (equal (test-s3-publish--object (test-s3-publish--key file)) "two"))
+      (test-s3-publish--edit-and-save "three")
+      (should (equal (test-s3-publish--object (test-s3-publish--key file)) "three"))
+      (should (equal (car kill-ring)
+                     (concat "https://bkt.fake-endpoint/"
+                             (test-s3-publish--key file)))))))
+
+(ert-deftest s3-publish-test-on-save-failure-does-not-fail-the-save ()
+  "A failed upload is reported, and the file is still saved."
+  (test-s3-publish-with-fake-s3
+    (test-s3-publish-with-on-save file "notes.txt" "one"
+      (let ((process-environment (cons "FAKE_S3_FAIL=1" process-environment)))
+        (test-s3-publish--edit-and-save "two")
+        (should-not (buffer-modified-p))
+        (should (equal (with-temp-buffer (insert-file-contents file) (buffer-string))
+                       "two"))))))
+
+(ert-deftest s3-publish-test-on-save-needs-a-file ()
+  "The mode refuses a buffer that is not visiting a file."
+  (test-s3-publish-with-fake-s3
+    (with-temp-buffer
+      (should-error (s3-publish-on-save-mode 1) :type 'user-error)
+      (should-not s3-publish-on-save-mode))))
+
+(ert-deftest s3-publish-test-on-save-profile-from-local-variable ()
+  "A profile named in the file's local variables is used without asking."
+  (test-s3-publish-with-fake-s3
+    (should (safe-local-variable-p 's3-publish-on-save-profile "test"))
+    (test-s3-publish-with-file file "notes.txt" "x"
+      (with-current-buffer (find-file-noselect file)
+        (unwind-protect
+            (cl-letf (((symbol-function 's3-publish--read-profile-name)
+                       (lambda () (error "Prompted for a profile"))))
+              (setq s3-publish-on-save-profile "test")
+              (s3-publish-on-save-mode 1)
+              (should (memq #'s3-publish--republish-on-save after-save-hook))
+              (s3-publish-on-save-mode -1)
+              (should-not (memq #'s3-publish--republish-on-save after-save-hook)))
+          (kill-buffer))))))
+
 (provide 'test-s3-publish-network)

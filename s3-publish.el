@@ -1685,10 +1685,18 @@ A public https URL when PROFILE has :public-acl, otherwise an s3:// URI."
         (format "https://%s.%s/%s" bucket (s3-publish--host-base profile) key)
       (format "s3://%s/%s" bucket key))))
 
+(defvar s3-publish--on-save nil
+  "Non-nil while `s3-publish-on-save-mode' is republishing a buffer.")
+
+(defvar s3-publish--profile-override nil
+  "When non-nil, the name of the profile to publish with, without asking.")
+
 (defun s3-publish--select-profile ()
-  "Prompt for a profile from `s3-publish-profiles' and return it with credentials."
+  "Prompt for a profile from `s3-publish-profiles' and return it with credentials.
+Does not prompt when `s3-publish--profile-override' names one."
   (s3-publish-get-credentials
-   (s3-publish-get-profile (s3-publish--read-profile-name))))
+   (s3-publish-get-profile (or s3-publish--profile-override
+                               (s3-publish--read-profile-name)))))
 
 (defun s3-publish--upload-no-feed (file profile key &optional mime-type)
   "Upload FILE to PROFILE's bucket under KEY without touching the RSS feed.
@@ -2080,7 +2088,8 @@ The buffer is tangled first when `s3-publish-org-tangle' says to."
   (let ((org-file (buffer-file-name)))
     (unless org-file
       (error "Current org buffer is not visiting a file"))
-    (s3-publish--org-maybe-tangle)
+    (unless s3-publish--on-save
+      (s3-publish--org-maybe-tangle))
     (let ((title (or (save-excursion
                        (goto-char (point-min))
                        (and (re-search-forward "^#\\+TITLE:\\s-*\\(.*\\)$" nil t)
@@ -2097,6 +2106,81 @@ The buffer is tangled first when `s3-publish-org-tangle' says to."
        org-file
        (lambda () (with-current-buffer buffer (s3-publish--export-buffer-to-html)))
        title description "Org source"))))
+
+
+;;; Republishing on save ------------------------------------------------------
+
+(defvar-local s3-publish-on-save-profile nil
+  "The profile `s3-publish-on-save-mode' republishes this buffer to.
+Asked for when the mode is turned on.  A file can name it in its local
+variables, along with turning the mode on:
+
+  # Local Variables:
+  # s3-publish-on-save-profile: \"default\"
+  # mode: s3-publish-on-save
+  # End:")
+(put 's3-publish-on-save-profile 'safe-local-variable #'stringp)
+
+(define-minor-mode s3-publish-on-save-mode
+  "Republish this buffer to S3 every time it is saved.
+
+Turning the mode on asks which profile to publish to, then every save
+publishes without asking: an Org buffer with `s3-publish-org-buffer', a
+Markdown buffer with `s3-publish-markdown-buffer', and any other file as
+itself.  A file's URL comes from its path, so it stays the same from
+save to save -- a page you shared keeps showing your latest version.
+
+Nothing is published when the mode is turned on, only on the next save.
+Publishing on save never tangles an Org buffer, whatever
+`s3-publish-org-tangle' says.  With `s3-publish-async' on, saving does
+not wait for the upload."
+  :lighter " S3"
+  (if (not s3-publish-on-save-mode)
+      (remove-hook 'after-save-hook #'s3-publish--republish-on-save t)
+    (unless buffer-file-name
+      (setq s3-publish-on-save-mode nil)
+      (user-error "This buffer is not visiting a file"))
+    (when (or (called-interactively-p 'any)
+              (not (member s3-publish-on-save-profile
+                           (s3-publish--profile-names))))
+      (setq s3-publish-on-save-profile
+            (let ((s3-publish-profile-history
+                   (if s3-publish-on-save-profile
+                       (cons s3-publish-on-save-profile
+                             s3-publish-profile-history)
+                     s3-publish-profile-history)))
+              (s3-publish--read-profile-name))))
+    (add-hook 'after-save-hook #'s3-publish--republish-on-save nil t)
+    (message "Saving will republish to profile \"%s\""
+             s3-publish-on-save-profile)))
+
+(defun s3-publish--republish-on-save ()
+  "Republish the current buffer, for `s3-publish-on-save-mode'.
+An error is reported rather than signalled, so it never fails the save."
+  (let ((s3-publish--profile-override s3-publish-on-save-profile)
+        (s3-publish--on-save t))
+    (condition-case err
+        (cond
+         ((derived-mode-p 'org-mode) (s3-publish-org-buffer))
+         ((s3-publish--markdown-buffer-p) (s3-publish-markdown-buffer))
+         (t (s3-publish--publish-visited-file)))
+      (error
+       (message "s3-publish-on-save-mode: %s" (error-message-string err))))))
+
+(defun s3-publish--publish-visited-file ()
+  "Publish the file the current buffer visits, as it is on disk.
+Unlike `s3-publish-buffer' the file itself is uploaded, not a temporary
+copy, so its key -- and URL -- is the same every time."
+  (let* ((file buffer-file-name)
+         (profile (s3-publish--select-profile))
+         (key (s3-publish-get-file-key file (plist-get profile :salt)))
+         (url (s3-publish--object-url profile key)))
+    (s3-publish--run url (format "%s/%s" (plist-get profile :bucket) key)
+                     's3-publish-upload-file
+                     (list file profile (file-name-nondirectory file)
+                           (format "Published on %s"
+                                   (format-time-string "%Y-%m-%d %H:%M"))))
+    (s3-publish--announce url)))
 
 
 ;;; Markdown -> Org conversion ------------------------------------------------
