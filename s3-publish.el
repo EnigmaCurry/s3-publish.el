@@ -4269,11 +4269,16 @@ Credentials are not included."
     (when (string-match (format "^[ \t]*#\\+%s:[ \t]*\\(.*?\\)[ \t]*$" keyword) text)
       (match-string 1 text))))
 
-(defun s3-publish--org-file-export-to-html (file)
+(defun s3-publish--org-file-export-to-html (file &optional run-code)
   "Export the Org FILE to a temporary HTML file and return its name.
 The export runs in a buffer of its own, holding the file as it is on
 disk, so a buffer visiting FILE is neither read nor touched.  Relative
-links resolve against FILE's directory, as they would from FILE itself."
+links resolve against FILE's directory, as they would from FILE itself.
+
+No code is run unless RUN-CODE is non-nil: source blocks are exported
+as written, without results.  With RUN-CODE the file is first tangled,
+if it asks to be with `#+S3_PUBLISH_TANGLE: t', and its source blocks
+are evaluated as the export calls for, without asking."
   (let ((buffer (generate-new-buffer " *s3-publish-api*"))
         (html (make-temp-file "s3-publish-api-" nil ".html")))
     (unwind-protect
@@ -4288,11 +4293,45 @@ links resolve against FILE's directory, as they would from FILE itself."
           ;; The user's Org hooks are for their own buffers.
           (delay-mode-hooks (org-mode))
           (let ((org-export-in-background nil))
-            (s3-publish--call-with-html-export-settings
-             (lambda () (org-export-to-file 'html html))))
+            (if run-code
+                (let ((org-confirm-babel-evaluate nil))
+                  (s3-publish--load-babel-languages)
+                  (when (eq (s3-publish--org-tangle-keyword) t)
+                    (require 'ob-tangle)
+                    ;; Default tangle targets are named after the file.
+                    (let ((buffer-file-name file))
+                      (org-babel-tangle)))
+                  (s3-publish--call-with-html-export-settings
+                   (lambda () (org-export-to-file 'html html))))
+              (s3-publish--without-babel-evaluation
+               (lambda ()
+                 (s3-publish--call-with-html-export-settings
+                  (lambda () (org-export-to-file 'html html)))))))
           (s3-publish--rewrite-toc-heading html)
           (s3-publish--move-postamble-into-content html))
       (kill-buffer buffer))))
+
+(defun s3-publish--without-babel-evaluation (fn)
+  "Call FN with Org Babel unable to evaluate anything.
+Header arguments such as `:exports' are still obeyed, so blocks export
+as they would, just without results."
+  (require 'ob-core)
+  (cl-letf (((symbol-function 'org-babel-execute-src-block)
+             (lambda (&rest _) nil)))
+    (funcall fn)))
+
+(defun s3-publish--load-babel-languages ()
+  "Load the Babel support for every language the current buffer uses."
+  (save-excursion
+    (goto-char (point-min))
+    (let ((case-fold-search t))
+      (while (re-search-forward "^[ \t]*#\\+begin_src[ \t]+\\([^ \t\n]+\\)" nil t)
+        (let ((language (downcase (match-string-no-properties 1))))
+          (require (intern (concat "ob-"
+                                   (pcase language
+                                     ((or "sh" "bash" "zsh") "shell")
+                                     (_ language))))
+                   nil t))))))
 
 (defun s3-publish--api-result (url keys)
   "Return the result of an API publish of URL as KEYS."
@@ -4303,7 +4342,7 @@ links resolve against FILE's directory, as they would from FILE itself."
             (and (plist-get status :error)
                  (list :error (plist-get status :error))))))
 
-(defun s3-publish-api-publish (file profile-name &optional title)
+(defun s3-publish-api-publish (file profile-name &optional title run-code)
   "Publish FILE with the profile named PROFILE-NAME, without prompting.
 
 FILE must be an absolute path.  An Org or Markdown file is published as
@@ -4314,7 +4353,8 @@ replaces what was there.  TITLE overrides the title in the RSS feed and
 HTML index.
 
 What is published is FILE as it is on disk: a buffer visiting it is not
-saved or read.  Org files are never tangled.
+saved or read.  No code in it is run unless RUN-CODE is non-nil; see
+`s3-publish--org-file-export-to-html'.
 
 Returns a plist: :url, :keys (every object written), :job and :status.
 With `s3-publish-async' on the upload is still running or queued when
@@ -4346,8 +4386,10 @@ its :status is `done' or `failed'."
              (url (s3-publish--publish-document
                    file
                    (if org-p
-                       (lambda () (s3-publish--org-file-export-to-html file))
-                     (lambda () (s3-publish--org-string-export-to-html org-text)))
+                       (lambda () (s3-publish--org-file-export-to-html file run-code))
+                     (lambda ()
+                       (s3-publish--without-babel-evaluation
+                        (lambda () (s3-publish--org-string-export-to-html org-text)))))
                    (or title
                        (s3-publish--file-keyword org-text "TITLE")
                        (file-name-nondirectory file))

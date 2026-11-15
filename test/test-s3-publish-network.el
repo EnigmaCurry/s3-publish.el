@@ -884,4 +884,130 @@ an error, since saving must not prompt."
                (s3-publish-api-sign file "1h" "test")))
       (should-not kill-ring))))
 
+;;; Running code when publishing
+
+(defconst test-s3-publish--code-doc
+  "#+TITLE: Code
+#+S3_PUBLISH_TANGLE: t
+
+#+begin_src shell :eval yes :exports both :results output
+  echo evaluated-$((6 * 7))
+  touch ran.flag
+#+end_src
+
+#+begin_src text :tangle tangled.txt
+tangled content
+#+end_src
+"
+  "An Org document that evaluates a block on export and asks to be tangled.")
+
+(ert-deftest s3-publish-test-api-runs-no-code-by-default ()
+  "Without RUN-CODE nothing is evaluated or tangled; code still exports."
+  (test-s3-publish-with-fake-s3
+    (test-s3-publish-with-file file "code.org" test-s3-publish--code-doc
+      (let ((org-confirm-babel-evaluate
+             (lambda (&rest _) (error "Asked to evaluate"))))
+        (s3-publish-api-publish file "test"))
+      (let ((html (test-s3-publish--object (test-s3-publish--key file ".html")))
+            (dir (file-name-directory file)))
+        (should (string-match-p "echo evaluated" html))
+        (should-not (string-match-p "evaluated-42" html))
+        (should-not (file-exists-p (expand-file-name "ran.flag" dir)))
+        (should-not (file-exists-p (expand-file-name "tangled.txt" dir)))))))
+
+(ert-deftest s3-publish-test-api-run-code-tangles-and-evaluates ()
+  "With RUN-CODE the document is tangled, and evaluated without asking."
+  (test-s3-publish-with-fake-s3
+    (test-s3-publish-with-file file "code.org" test-s3-publish--code-doc
+      (let ((org-confirm-babel-evaluate t))
+        (cl-letf (((symbol-function 'yes-or-no-p)
+                   (lambda (&rest _) (error "Asked a question")))
+                  ((symbol-function 'y-or-n-p)
+                   (lambda (&rest _) (error "Asked a question"))))
+          (s3-publish-api-publish file "test" nil t)))
+      (let ((html (test-s3-publish--object (test-s3-publish--key file ".html")))
+            (dir (file-name-directory file)))
+        (should (string-match-p "evaluated-42" html))
+        (should (file-exists-p (expand-file-name "ran.flag" dir)))
+        (should (equal (with-temp-buffer
+                         (insert-file-contents (expand-file-name "tangled.txt" dir))
+                         (buffer-string))
+                       "tangled content\n"))))))
+
+
+;;; The skill's batch driver
+
+(defconst test-s3-publish--s3p
+  (file-truename
+   (expand-file-name "../../claude-skill/s3-publish/s3p" test-s3-publish--bin))
+  "The skill's command line wrapper.")
+
+(defun test-s3-publish--s3p (&rest args)
+  "Run s3p with ARGS in a sandbox HOME; return (EXIT . parsed JSON)."
+  (with-temp-buffer
+    (let* ((default-directory (file-truename temporary-file-directory))
+           (exit (apply #'call-process test-s3-publish--s3p nil
+                       (list t nil) nil args)))
+      (goto-char (point-min))
+      (cons exit (json-parse-buffer :object-type 'alist :null-object nil
+                                    :false-object nil)))))
+
+(defmacro test-s3-publish-with-s3p-home (&rest body)
+  "Run BODY with a sandbox HOME holding s3-publish settings and credentials."
+  (declare (indent 0) (debug t))
+  `(let* ((home (make-temp-file "s3p-home-" t))
+          (process-environment
+           (append (list (concat "HOME=" home)
+                         "S3P_SETTINGS_FILE"
+                         "S3P_HISTORY_FILE"
+                         "S3P_LOAD_PATH")
+                   process-environment)))
+     (unwind-protect
+         (progn
+           (make-directory (expand-file-name ".emacs.d" home))
+           (with-temp-file (expand-file-name ".emacs.d/custom.el" home)
+             (insert ";; Other settings must not be evaluated:\n"
+                     "(error \"evaluated the custom file\")\n"
+                     (format "(custom-set-variables\n '(other-package-option (error \"no\"))\n '(s3-publish-profiles '%S)\n '(s3-publish-cache-control \"max-age=7\"))\n"
+                             (list test-s3-publish--profile))))
+           (with-temp-file (expand-file-name ".authinfo" home)
+             (insert "machine s3-publish-test login AK password SK\n"))
+           ,@body)
+       (delete-directory home t))))
+
+(ert-deftest s3-publish-test-s3p-publish-list-delete ()
+  "The skill publishes, lists and deletes through a batch Emacs."
+  (test-s3-publish-with-fake-s3
+    (test-s3-publish-with-s3p-home
+      (test-s3-publish-with-file file "doc.org" "#+TITLE: Via s3p\n\nHi.\n"
+        (let ((check (test-s3-publish--s3p "check")))
+          (should (= 0 (car check)))
+          (should (equal (alist-get 'profiles (cdr check)) 1)))
+        (let ((profiles (test-s3-publish--s3p "profiles")))
+          (should (equal (alist-get 'name (aref (cdr profiles) 0)) "test")))
+        (let ((published (test-s3-publish--s3p "publish" file "test")))
+          (should (= 0 (car published)))
+          (should (equal (alist-get 'url (cdr published))
+                         (concat "https://bkt.fake-endpoint/"
+                                 (test-s3-publish--key file ".html")))))
+        (should (string-match-p "Via s3p" (test-s3-publish--object
+                                           (test-s3-publish--key file ".html"))))
+        ;; Settings beyond the profiles came through too.
+        (should (member "--add-header=Cache-Control: max-age=7"
+                        (test-s3-publish--object-flags
+                         (test-s3-publish--key file ".html"))))
+        (let ((listed (test-s3-publish--s3p "list" "test")))
+          (should (equal (alist-get 'title (aref (cdr listed) 0)) "Via s3p")))
+        (let ((deleted (test-s3-publish--s3p "delete" file "test")))
+          (should (= 2 (length (alist-get 'deleted (cdr deleted))))))
+        (should-not (test-s3-publish--object (test-s3-publish--key file ".html")))))))
+
+(ert-deftest s3-publish-test-s3p-failure-is-json ()
+  "A failure exits non-zero with the error as JSON."
+  (test-s3-publish-with-fake-s3
+    (test-s3-publish-with-s3p-home
+      (let ((result (test-s3-publish--s3p "list" "no-such-profile")))
+        (should (= 1 (car result)))
+        (should (string-match-p "no-such-profile" (alist-get 'error (cdr result))))))))
+
 (provide 'test-s3-publish-network)
