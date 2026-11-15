@@ -26,14 +26,14 @@ share it with.
 There is also an option to create an HTML index and RSS feed if you
 wish to make these URLs discoverable. And when you want a URL you can
 read, or type, an Org or Markdown document can override the hash with
-a path of your own choosing, e.g. =notes/my-post= -- see [[#choosing-a-url][Choosing a
+a path of your own choosing, e.g. =notes/my-post= -- see [[#choosing-a-documents-url][Choosing a
 document's URL]].
 
 Org and Markdown buffers get special treatment: they are exported to
 styled, self-contained HTML pages (via Org's HTML exporter, so both
 look the same), published alongside their original source, and listed
 as a single entry in the feed. The styling is configurable -- see
-[[#html-theme][Theming the published HTML]] and [[#html-anchors][Headings, anchors and
+[[#theming-the-published-html][Theming the published HTML]] and [[#headings-anchors-and-the-table-of-contents][Headings, anchors and
 the table of contents]].
 
 ** Dependencies
@@ -262,7 +262,7 @@ Markdown is not rendered by a separate Markdown-to-HTML converter.  It
 is first translated to Org markup, then handed to Org's own HTML
 exporter. Published Markdown is therefore styled identically to
 published Org -- same stylesheet, table of contents, section
-numbering, source block containers and postamble. See [[#html-theme][Theming the published
+numbering, source block containers and postamble. See [[#theming-the-published-html][Theming the published
 HTML]].
 
 The built-in translator needs no external programs and understands:
@@ -308,7 +308,7 @@ unchanged.
 
 *** Images
 :PROPERTIES:
-:CUSTOM_ID: local-images
+:CUSTOM_ID: images
 :END:
 
 An image that lives on your disk -- =[[file:diagram.png]]= in Org,
@@ -357,7 +357,7 @@ itself, with its profile, in its local variables:
 
 *** Theming the published HTML
 :PROPERTIES:
-:CUSTOM_ID: html-theme
+:CUSTOM_ID: theming-the-published-html
 :END:
 
 Org's own export stylesheet is deliberately minimal, which makes
@@ -460,7 +460,7 @@ typical published page.
 
 *** Headings, anchors and the table of contents
 :PROPERTIES:
-:CUSTOM_ID: html-anchors
+:CUSTOM_ID: headings-anchors-and-the-table-of-contents
 :END:
 
 Org gives a heading an =id=, reachable only from the table of contents.
@@ -581,7 +581,7 @@ export them. Therefore these will always make new S3 keys.
 
 ** Choosing a document's URL
 :PROPERTIES:
-:CUSTOM_ID: choosing-a-url
+:CUSTOM_ID: choosing-a-documents-url
 :END:
 
 A document is normally published under a key hashed from its path. To
