@@ -3,7 +3,7 @@
 This is an Emacs package that quickly publishes any buffer, region, or
 file to S3 and the web (AWS S3, DigitalOcean spaces, etc.).
 
-Example: https://org.nyc3.digitaloceanspaces.com/index.html
+Example: https://org.nyc3.digitaloceanspaces.com/8ik4g-8vbao-w4adc-nsjxe-qr0uo.html ([[https://org.nyc3.digitaloceanspaces.com/index.html][index]])
 
 ------------------------------------------------------------
 
