@@ -163,6 +163,12 @@ secure than this plain authinfo file, including:
 To set these up is left as an exercise to the reader.
 
 ** Usage
+
+Every command that asks for an S3 profile starts on the profile you
+used last, so =RET= publishes to the same place again. It is never
+chosen without asking. With =savehist-mode= enabled, the last profile
+is remembered across Emacs sessions too.
+
 *** Publish buffer
 
 You can publish your current buffer:

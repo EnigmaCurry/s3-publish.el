@@ -804,3 +804,73 @@ Publishing it anyway would run its code against stale files."
                   (lambda (&rest _) (setq published t))))
          (should-error (s3-publish-org-buffer) :type 'user-error))
        (should-not published)))))
+
+
+;;; Profile prompt
+
+(defmacro test-s3-publish--with-profiles (names &rest body)
+  "Run BODY with profiles named NAMES and an empty profile history."
+  (declare (indent 1))
+  `(let ((s3-publish-profiles (mapcar (lambda (n) (list :name n)) ,names))
+         (s3-publish-profile-history nil)
+         (history-delete-duplicates nil))
+     ,@body))
+
+(defun test-s3-publish--pick-profile (choice)
+  "Answer the profile prompt with CHOICE, or the default when CHOICE is nil.
+Returns (DEFAULT . RESULT): what the prompt started on and what it returned."
+  (let (offered)
+    (cl-letf (((symbol-function 'completing-read)
+               (lambda (_prompt collection _pred require-match
+                                _initial hist def &rest _)
+                 (should (eq require-match t))
+                 (should (eq hist 's3-publish-profile-history))
+                 (should (member def collection))
+                 (setq offered def)
+                 (or choice def))))
+      (let ((result (s3-publish--read-profile-name)))
+        (cons offered result)))))
+
+(ert-deftest s3-publish-test-profile-prompt-starts-on-default-profile ()
+  "With no history, the prompt starts on the profile named \"default\"."
+  (test-s3-publish--with-profiles '("work" "default" "home")
+    (should (equal (car (test-s3-publish--pick-profile nil)) "default"))))
+
+(ert-deftest s3-publish-test-profile-prompt-starts-on-first-without-default ()
+  "With no history and no \"default\" profile, the prompt starts on the first."
+  (test-s3-publish--with-profiles '("work" "home")
+    (should (equal (car (test-s3-publish--pick-profile nil)) "work"))))
+
+(ert-deftest s3-publish-test-profile-prompt-starts-on-last-used ()
+  "After choosing a profile, the next prompt starts on it."
+  (test-s3-publish--with-profiles '("default" "work" "home")
+    (should (equal (cdr (test-s3-publish--pick-profile "home")) "home"))
+    (should (equal (car (test-s3-publish--pick-profile nil)) "home"))
+    (should (equal (cdr (test-s3-publish--pick-profile "work")) "work"))
+    (should (equal (car (test-s3-publish--pick-profile nil)) "work"))))
+
+(ert-deftest s3-publish-test-profile-prompt-accepting-default-keeps-it ()
+  "Accepting the offered profile keeps it as the next default."
+  (test-s3-publish--with-profiles '("default" "work")
+    (test-s3-publish--pick-profile "work")
+    (should (equal (test-s3-publish--pick-profile nil) '("work" . "work")))
+    (should (equal (car (test-s3-publish--pick-profile nil)) "work"))))
+
+(ert-deftest s3-publish-test-profile-prompt-skips-removed-profiles ()
+  "A last-used profile that no longer exists is passed over."
+  (test-s3-publish--with-profiles '("default" "work" "home")
+    (test-s3-publish--pick-profile "work")
+    (test-s3-publish--pick-profile "home")
+    (setq s3-publish-profiles (list (list :name "default") (list :name "work")))
+    (should (equal (car (test-s3-publish--pick-profile nil)) "work"))))
+
+(ert-deftest s3-publish-test-select-profile-uses-the-prompt ()
+  "Publishing selects its profile through the shared prompt."
+  (test-s3-publish--with-profiles '("default" "work")
+    (test-s3-publish--pick-profile "work")
+    (let (offered)
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (_p _c _pr _r _i _h def &rest _) (setq offered def) def))
+                ((symbol-function 's3-publish-get-credentials) #'identity))
+        (should (equal (plist-get (s3-publish--select-profile) :name) "work")))
+      (should (equal offered "work")))))

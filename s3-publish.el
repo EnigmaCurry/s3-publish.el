@@ -51,6 +51,39 @@ Signals an error if no credentials are found."
           (append profile (list :access-key access-key :secret-key secret)))
       (error "No credentials found for s3-publish profile: %s" profile-name))))
 
+(defvar s3-publish-profile-history nil
+  "Minibuffer history of S3 profile names chosen at the profile prompt.
+Its first element is the profile used last, which the prompt starts on.
+`savehist-mode' saves it across sessions along with other histories.")
+
+(defun s3-publish--profile-names ()
+  "Return the names of the profiles in `s3-publish-profiles'."
+  (mapcar (lambda (p) (plist-get p :name)) s3-publish-profiles))
+
+(defun s3-publish--default-profile-name (names)
+  "Return the profile among NAMES that the profile prompt starts on.
+That is the profile used last, if it still exists, then the one named
+\"default\", then the first."
+  (or (seq-find (lambda (name) (member name names)) s3-publish-profile-history)
+      (car (member "default" names))
+      (car names)))
+
+(defun s3-publish--read-profile-name ()
+  "Prompt for the name of a profile in `s3-publish-profiles'.
+The prompt starts on the profile used last, so pressing RET reuses it;
+it is never chosen without asking."
+  (let* ((names (s3-publish--profile-names))
+         (default (s3-publish--default-profile-name names)))
+    (let ((name (completing-read (if (fboundp 'format-prompt)
+                                     (format-prompt "Select S3 profile" default)
+                                   "Select S3 profile: ")
+                                 names nil t nil
+                                 's3-publish-profile-history default)))
+      ;; Accepting the default with an empty RET leaves the history as it
+      ;; was, so record the choice here to make it the next default.
+      (add-to-history 's3-publish-profile-history name)
+      name)))
+
 (defun s3-publish-get-profile (name)
   "Return the S3 publishing profile with NAME, minus credentials.
 If no profile with the given NAME exists in `s3-publish-profiles',
@@ -1428,14 +1461,8 @@ A public https URL when PROFILE has :public-acl, otherwise an s3:// URI."
 
 (defun s3-publish--select-profile ()
   "Prompt for a profile from `s3-publish-profiles' and return it with credentials."
-  (let* ((profile-names (mapcar (lambda (p) (plist-get p :name))
-                                s3-publish-profiles))
-         (default (if (member "default" profile-names)
-                      "default"
-                    (car profile-names)))
-         (profile-name (completing-read "Select S3 profile: "
-                                        profile-names nil t nil nil default)))
-    (s3-publish-get-credentials (s3-publish-get-profile profile-name))))
+  (s3-publish-get-credentials
+   (s3-publish-get-profile (s3-publish--read-profile-name))))
 
 (defun s3-publish--upload-no-feed (file profile key &optional mime-type)
   "Upload FILE to PROFILE's bucket under KEY without touching the RSS feed.
@@ -2309,10 +2336,7 @@ the kill ring and displayed in the echo area."
     (with-temp-file temp-file
       (insert contents))
     ;; Prompt for a profile.
-    (let* ((profile-names (mapcar (lambda (p) (plist-get p :name))
-                                  s3-publish-profiles))
-           (profile-name
-            (completing-read "Select S3 profile: " profile-names nil t))
+    (let* ((profile-name (s3-publish--read-profile-name))
            (profile
             (s3-publish-get-credentials (s3-publish-get-profile profile-name)))
            (upload-result (s3-publish-upload-file temp-file profile title description))
@@ -2343,13 +2367,7 @@ and displayed in the echo area."
     (with-temp-file temp-file
       (insert region-text))
     ;; Prompt for a profile.
-    (let* ((profile-names
-            (mapcar (lambda (p) (plist-get p :name)) s3-publish-profiles))
-           (default
-            (if (member "default" profile-names) "default" (car profile-names)))
-           (profile-name
-            (completing-read "Select S3 profile: "
-                             profile-names nil t nil nil default))
+    (let* ((profile-name (s3-publish--read-profile-name))
            (profile (s3-publish-get-credentials
                      (s3-publish-get-profile profile-name)))
            (upload-result (s3-publish-upload-file temp-file profile title description))
@@ -2364,10 +2382,7 @@ and displayed in the echo area."
   "View the HTML index for the specified PROFILE-NAME.
 If the index doesn't exist yet, offer to create it."
   (interactive
-   (list (completing-read "Select S3 profile: "
-                          (mapcar (lambda (p) (plist-get p :name))
-                                  s3-publish-profiles)
-                          nil t)))
+   (list (s3-publish--read-profile-name)))
   (let* ((profile (s3-publish-get-credentials
                    (s3-publish-get-profile profile-name)))
          (bucket (plist-get profile :bucket))
@@ -2458,10 +2473,7 @@ If DAYS-INPUT is empty, delete the lifecycle policy using
 PROFILE-NAME is selected from `s3-publish-profiles' and used to retrieve
 the bucket name and credentials. An error is signaled if no bucket is defined.
 Prompts to use alternative credentials since this operation requires elevated privileges."
-  (interactive (list (completing-read "Select S3 profile: "
-                                      (mapcar (lambda (p) (plist-get p :name))
-                                              s3-publish-profiles)
-                                      nil t)
+  (interactive (list (s3-publish--read-profile-name)
                      (read-string
                       "Enter number of expiry days (leave blank to delete policy): ")))
   (let* ((base-profile (s3-publish-get-profile profile-name))
@@ -2526,10 +2538,7 @@ not directories before uploading them. The resulting URLs (one per line) are
 copied to the kill ring and displayed."
   (interactive)
   (let* ((files (dired-get-marked-files))
-         (profile-names
-          (mapcar (lambda (p) (plist-get p :name)) s3-publish-profiles))
-         (profile-name
-          (completing-read "Select S3 profile: " profile-names nil t))
+         (profile-name (s3-publish--read-profile-name))
          (profile
           (s3-publish-get-credentials (s3-publish-get-profile profile-name)))
          (result (s3-publish-upload-multiple-files files profile)))
@@ -2773,10 +2782,7 @@ Prompts for an S3 profile, then for each URL:
 At the end, prints how many objects were deleted."
   (interactive "sS3 URLs to remove (one per line): ")
   (let* ((lines (split-string urls-string "\n" t "[ \t\n]+"))
-         (profile-names (mapcar (lambda (p) (plist-get p :name))
-                                s3-publish-profiles))
-         (profile-name
-          (completing-read "Select S3 profile: " profile-names nil t))
+         (profile-name (s3-publish--read-profile-name))
          (profile
           (s3-publish-get-credentials (s3-publish-get-profile profile-name)))
          (profile-bucket (plist-get profile :bucket))
@@ -2858,10 +2864,7 @@ At the end, prints how many objects were deleted."
 Prompts for an S3 profile (from `s3-publish-profiles') to use for removal.
 Returns the S3 URI of the removed file if successful."
   (interactive "fFile to remove from S3: ")
-  (let* ((profile-names
-          (mapcar (lambda (p) (plist-get p :name)) s3-publish-profiles))
-         (profile-name
-          (completing-read "Select S3 profile: " profile-names nil t))
+  (let* ((profile-name (s3-publish--read-profile-name))
          (profile
           (s3-publish-get-credentials (s3-publish-get-profile profile-name))))
     (s3-publish--remove-file-internal file profile)))
@@ -2895,10 +2898,7 @@ copied to the kill ring, and displayed."
                       files)
       (error
        "One or more selected files do not exist or are not regular files"))
-    (let* ((profile-names (mapcar (lambda (p) (plist-get p :name))
-                                  s3-publish-profiles))
-           (profile-name (completing-read
-                            "Select S3 profile: " profile-names nil t))
+    (let* ((profile-name (s3-publish--read-profile-name))
            (profile
             (s3-publish-get-credentials (s3-publish-get-profile profile-name)))
            (results (mapcar (lambda (f)
@@ -3289,10 +3289,7 @@ When the mount is successful, opens the mountpoint in a dired buffer."
   (interactive
    (list
     ;; Prompt for profile name
-    (completing-read "Select S3 profile: "
-                     (mapcar (lambda (p) (plist-get p :name))
-                             s3-publish-profiles)
-                     nil t)
+    (s3-publish--read-profile-name)
     ;; Prompt for mountpoint
     (read-directory-name "Mount at directory: ")))
 
