@@ -779,11 +779,11 @@ mini buffer.
 
 A signed link that outlives its object would point at a deleted page,
 and its countdown would promise a time the page is already gone by. So
-tell s3-publish the bucket's lifetime, as the profile's =:lifetime=, and
-no link it signs is ever longer than the object has left:
-
- * =M-x s3-publish-manage-profiles=, =Edit=, and answer the lifetime
-   question with e.g. =7d=.
+=s3-publish-bucket-lifecycle= records the lifetime it sets, as =:lifetime=
+on every profile using the bucket (and forgets it when it deletes the
+rule), and no link s3-publish signs is ever longer than the object has
+left. For a bucket whose rule was set some other way, set it again with
+=s3-publish-bucket-lifecycle= so the profiles learn it.
 
 A fresh publish then gets at most the lifetime. A link signed later --
 =M-x s3-publish-sign-url=, =s=, =w= or =RET= in the list -- is cut to the

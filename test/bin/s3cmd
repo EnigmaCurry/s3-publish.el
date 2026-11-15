@@ -45,6 +45,17 @@ case "$cmd" in
         rm -f "$(path_of "${positional[1]}")" "$(path_of "${positional[1]}").args"
         echo "delete: '${positional[1]}'"
         ;;
+    expire)
+        # The rule is kept in $FAKE_S3_ROOT/lifecycle-BUCKET.
+        b="${positional[1]#s3://}"; b="${b%%/*}"
+        printf '%s\n' "${flags[@]-}" > "$root/lifecycle-$b"
+        echo "Bucket 's3://$b/': expiration configuration is set."
+        ;;
+    dellifecycle)
+        b="${positional[1]#s3://}"; b="${b%%/*}"
+        rm -f "$root/lifecycle-$b"
+        echo "Bucket 's3://$b/': lifecycle configuration is deleted."
+        ;;
     info)
         # Like real s3cmd info, with the object's file time as its upload time.
         src="$(path_of "${positional[1]}")"

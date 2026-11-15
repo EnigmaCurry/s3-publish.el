@@ -599,7 +599,8 @@ Each profile is an alist containing the following keys:
   - :rss-link   The base URL for the RSS feed (usually the bucket URL).
   - :lifetime   How long the bucket keeps an object, when a lifecycle rule
                 deletes objects, e.g. \"7d\".  Signed links are then never
-                longer than an object has left.
+                longer than an object has left.  Recorded by
+                `s3-publish-bucket-lifecycle' when it sets the rule.
 The auth-source machine name will be derived by prepending \"s3-publish-\" to
 the profile name.
 Example:
@@ -658,19 +659,6 @@ If the buffer does not exist, it is created."
   (display-buffer s3-publish-profiles-buffer))
 
 ;; Extend profile add function to include RSS settings
-(defun s3-publish--read-lifetime (current)
-  "Ask how long the bucket keeps objects; CURRENT is the present answer.
-Returns a duration such as \"7d\", or nil for a bucket that keeps them."
-  (let ((answer (string-trim
-                 (read-string
-                  (format "Does a lifecycle rule delete objects after a time? \
-Duration (e.g. 7d), or empty if not%s: "
-                          (if current (format " (current: %s)" current) ""))
-                  nil nil (or current "")))))
-    (unless (string-empty-p answer)
-      (s3-publish--parse-duration answer)
-      answer)))
-
 (defun s3-publish-add-profile ()
   "Add a new s3-publish profile interactively.
 Generates a random salt (an 8-character string) and stores it with the profile."
@@ -681,14 +669,12 @@ Generates a random salt (an 8-character string) and stores it with the profile."
          (salt (substring (md5 (format "%s-%d" (current-time-string) (random)))
                           0 32))
          (rss-feed (y-or-n-p "Maintain an RSS feed for published files? "))
-         (lifetime (s3-publish--read-lifetime nil))
-         (new-profile (append (list :name name
-                                    :endpoint endpoint
-                                    :bucket bucket
-                                    :public-acl public-acl
-                                    :salt salt
-                                    :rss-feed rss-feed)
-                              (and lifetime (list :lifetime lifetime)))))
+         (new-profile (list :name name
+                            :endpoint endpoint
+                            :bucket bucket
+                            :public-acl public-acl
+                            :salt salt
+                            :rss-feed rss-feed)))
 
     ;; If RSS feed is enabled, prompt for additional settings
     (when rss-feed
@@ -737,7 +723,8 @@ Generates a random salt (an 8-character string) and stores it with the profile."
                 (y-or-n-p (format "Maintain RSS feed? (current: %s): "
                                   (if rss-enabled "Yes" "No"))))
                ;; Retain the existing salt
-               (new-lifetime (s3-publish--read-lifetime
+               ;; Set by `s3-publish-bucket-lifecycle', for the bucket.
+               (lifetime (and (equal new-bucket (plist-get profile :bucket))
                               (plist-get profile :lifetime)))
                (edited-profile (append
                                 (list :name name
@@ -746,8 +733,7 @@ Generates a random salt (an 8-character string) and stores it with the profile."
                                       :public-acl new-public-acl
                                       :salt (plist-get profile :salt)
                                       :rss-feed new-rss-feed)
-                                (and new-lifetime
-                                     (list :lifetime new-lifetime)))))
+                                (and lifetime (list :lifetime lifetime)))))
 
           ;; If RSS feed is newly enabled or was already enabled
           (when new-rss-feed
@@ -3581,17 +3567,42 @@ Prompts to use alternative credentials since this operation requires elevated pr
          (bucket (plist-get profile :bucket)))
     (unless bucket
       (error "No bucket defined for profile %s" profile-name))
-    (if (string= days-input "")
-        (progn
-          (s3-publish--s3cmd-or-error profile "Deleting the lifecycle policy"
-                                      "dellifecycle" (format "s3://%s" bucket))
-          (message "Lifecycle policy deleted for bucket %s." bucket))
-      (s3-publish--s3cmd-or-error profile "Setting the lifecycle policy"
-                                  "expire"
-                                  (format "--expiry-days=%s" days-input)
-                                  (format "s3://%s" bucket))
-      (message "Lifecycle policy set for bucket %s: objects expire after %s days"
-               bucket days-input))))
+    (let ((days-input (string-trim days-input)))
+      (unless (or (string= days-input "")
+                  (string-match-p "\\`[1-9][0-9]*\\'" days-input))
+        (user-error "Expiry days must be a whole number of days, or empty"))
+      (if (string= days-input "")
+          (progn
+            (s3-publish--s3cmd-or-error profile "Deleting the lifecycle policy"
+                                        "dellifecycle" (format "s3://%s" bucket))
+            (s3-publish--record-lifetime base-profile nil)
+            (message "Lifecycle policy deleted for bucket %s." bucket))
+        (s3-publish--s3cmd-or-error profile "Setting the lifecycle policy"
+                                    "expire"
+                                    (format "--expiry-days=%s" days-input)
+                                    (format "s3://%s" bucket))
+        (s3-publish--record-lifetime base-profile (concat days-input "d"))
+        (message "Lifecycle policy set for bucket %s: objects expire after %s days"
+                 bucket days-input)))))
+
+(defun s3-publish--record-lifetime (profile lifetime)
+  "Record LIFETIME on every profile using PROFILE's bucket, and save them.
+LIFETIME is a duration such as \"7d\", or nil for a bucket that keeps
+its objects.  See `s3-publish-bucket-lifecycle'."
+  (setq s3-publish-profiles
+        (mapcar (lambda (p)
+                  (if (and (equal (plist-get p :bucket) (plist-get profile :bucket))
+                           (equal (s3-publish--host-base p)
+                                  (s3-publish--host-base profile)))
+                      (let ((p (copy-sequence p)))
+                        (if lifetime
+                            (plist-put p :lifetime lifetime)
+                          (cl-loop for (key value) on p by #'cddr
+                                   unless (eq key :lifetime)
+                                   append (list key value))))
+                    p))
+                s3-publish-profiles))
+  (s3-publish-save-profiles))
 
 (defun s3-publish-upload-multiple-files (files profile)
   "Upload multiple FILES to S3 using PROFILE.

@@ -1609,4 +1609,39 @@ by, failing the publish."
   (should (equal (s3-publish--format-seconds 3600) "1h"))
   (should (equal (s3-publish--format-seconds 30) "1m")))
 
+(ert-deftest s3-publish-test-lifecycle-records-lifetime ()
+  "Setting a bucket's lifecycle records its lifetime on its profiles."
+  (test-s3-publish-with-fake-s3
+    (let ((s3-publish-profiles
+           (list test-s3-publish--profile
+                 (plist-put (copy-sequence test-s3-publish--profile) :name "same-bucket")
+                 (plist-put (copy-sequence test-s3-publish--profile) :bucket "other")))
+          (saved 0))
+      (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) nil))
+                ((symbol-function 'customize-save-variable)
+                 (lambda (&rest _) (setq saved (1+ saved)))))
+        (s3-publish-bucket-lifecycle "test" "7")
+        (should (string-match-p "--expiry-days=7"
+                                (with-temp-buffer
+                                  (insert-file-contents
+                                   (expand-file-name "lifecycle-bkt" test-s3-publish--root))
+                                  (buffer-string))))
+        (should (equal (mapcar (lambda (p) (plist-get p :lifetime)) s3-publish-profiles)
+                       '("7d" "7d" nil)))
+        (should (= saved 1))
+        ;; Editing a profile keeps it, without asking.
+        (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "test"))
+                  ((symbol-function 'read-string)
+                   (lambda (_prompt &optional _initial _history default &rest _) default)))
+          (s3-publish-edit-profile))
+        (should (equal (plist-get (car s3-publish-profiles) :lifetime) "7d"))
+        ;; Deleting the rule forgets it.
+        (s3-publish-bucket-lifecycle "test" "")
+        (should-not (file-exists-p (expand-file-name "lifecycle-bkt" test-s3-publish--root)))
+        (should (equal (mapcar (lambda (p) (plist-get p :lifetime)) s3-publish-profiles)
+                       '(nil nil nil)))
+        (should-not (plist-member (car s3-publish-profiles) :lifetime))
+        ;; Only whole days.
+        (should-error (s3-publish-bucket-lifecycle "test" "7d") :type 'user-error)))))
+
 (provide 'test-s3-publish-network)
