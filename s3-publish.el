@@ -3831,17 +3831,19 @@ A document's source file is deleted along with its HTML page."
       (s3-publish-list-refresh)
       (message "Deleted %s" key))))
 
-(defvar s3-publish-list-mode-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "RET") #'s3-publish-list-browse)
-    (define-key map "w" #'s3-publish-list-copy-url)
-    (define-key map "s" #'s3-publish-list-sign-url)
-    (define-key map "D" #'s3-publish-list-delete)
-    (define-key map "t" #'s3-publish-list-toggle-source)
-    (define-key map "e" #'s3-publish-list-edit)
-    (define-key map "g" #'s3-publish-list-refresh)
-    map)
+(defvar s3-publish-list-mode-map (make-sparse-keymap)
   "Keymap for `s3-publish-list-mode'.")
+
+;; Bound at top level rather than inside the `defvar', which re-evaluating
+;; this file skips once the map exists: this way a reload adds new keys to
+;; the map in place, including in list buffers already open.
+(define-key s3-publish-list-mode-map (kbd "RET") #'s3-publish-list-browse)
+(define-key s3-publish-list-mode-map "w" #'s3-publish-list-copy-url)
+(define-key s3-publish-list-mode-map "s" #'s3-publish-list-sign-url)
+(define-key s3-publish-list-mode-map "D" #'s3-publish-list-delete)
+(define-key s3-publish-list-mode-map "t" #'s3-publish-list-toggle-source)
+(define-key s3-publish-list-mode-map "e" #'s3-publish-list-edit)
+(define-key s3-publish-list-mode-map "g" #'s3-publish-list-refresh)
 
 (define-derived-mode s3-publish-list-mode tabulated-list-mode "S3 Published"
   "Major mode listing the files published with an s3-publish profile.
