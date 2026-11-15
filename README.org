@@ -661,10 +661,10 @@ longest a signed URL works on DigitalOcean (and AWS), so a longer
 expiry is an error rather than a link that dies early; for a provider
 that allows more, raise =s3-publish-signed-url-max-expiry=.
 
-A page opened through a signed link says so at the bottom, in green,
-with a countdown to when the link stops working; if the page is left
-open past then, the notice turns red. Opened any other way it shows
-nothing. Turn it off with =(setq s3-publish-html-link-expiry-notice nil)=.
+A page opened through a signed link says so in a one-line green bar
+right under its title, counting down to when the link stops working; if
+the page is left open past then, the bar turns red. Opened any other
+way, the page has no bar. Turn it off with =(setq s3-publish-html-link-expiry-notice nil)=.
 
 To sign a link on demand -- for a file published earlier, or to hand
 out a link from a public bucket that stops working -- use:

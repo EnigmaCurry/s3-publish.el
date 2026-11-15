@@ -1266,14 +1266,16 @@ button.s3-publish-copy:hover {
 	border-color: #ff5370;
 }
 
-/* The countdown `s3-publish-html-link-expiry-notice' adds to a page opened
-   through a signed URL. */
+/* The bar `s3-publish-html-link-expiry-notice' adds under the title of a
+   page opened through a signed URL, counting down to the link's expiry. */
 #s3-publish-expiry {
-	border-color: #2ea043;
+	background: #10281a;
+	border-bottom: 1px solid #2ea043;
 	color: #3fb950;
 }
 #s3-publish-expiry.s3-publish-expired {
-	border-color: #f85149;
+	background: #2d1214;
+	border-bottom-color: #f85149;
 	color: #f85149;
 }
 
@@ -1453,8 +1455,8 @@ th { background: #eaeef2; }
 .timestamp { color: #6e7781; }
 button.s3-publish-copy { border-color: #afb8c1; background: #f6f8fa; color: #1f2328; }
 button.s3-publish-copy:hover { border-color: #cf222e; }
-#s3-publish-expiry { border-color: #1a7f37; color: #1a7f37; }
-#s3-publish-expiry.s3-publish-expired { border-color: #cf222e; color: #cf222e; }
+#s3-publish-expiry { background: #dafbe1; border-bottom-color: #1a7f37; color: #1a7f37; }
+#s3-publish-expiry.s3-publish-expired { background: #ffebe9; border-bottom-color: #cf222e; color: #cf222e; }
 #org-download { border-top-color: #d0d7de; }
 #org-download a { border-color: #afb8c1; background: #f6f8fa; }
 #org-download a:hover { border-color: #cf222e; }
@@ -1708,9 +1710,9 @@ document.addEventListener('DOMContentLoaded', function () {
 A signed URL -- see `s3-publish-signed-url-expiry' -- only works until
 it expires.  A small inline script in every published page checks the
 address it was opened from: when that carries a signature with an
-expiry, a green line under the page's date says how long the link keeps
-working, ticking down every second, and turns red once it has expired.
-Opened any other way, the page shows nothing.
+expiry, a one-line green bar under the page's title says how long the
+link keeps working, ticking down every second, and turns red once it
+has expired.  Opened any other way, the page has no bar.
 
 Like the copy button, it is added through `org-html-scripts', so it
 does not depend on `s3-publish-html-theme'; a theme can restyle
@@ -1721,21 +1723,30 @@ does not depend on `s3-publish-html-theme'; a theme can restyle
 (defconst s3-publish-html-link-expiry-script "\
 <style>
 :where(#s3-publish-expiry) {
+  margin: -0.2em -1em 1em;
+  padding: 0.35em 1em;
+  background: #10281a;
+  border-bottom: 1px solid #2ea043;
   color: #3fb950;
+  font-size: 90%;
+  font-weight: bold;
+  text-align: center;
 }
 :where(#s3-publish-expiry.s3-publish-expired) {
+  background: #2d1214;
+  border-bottom-color: #f85149;
   color: #f85149;
 }
-/* Only where there is no postamble date line to sit under. */
-:where(div#s3-publish-expiry) {
-  margin-top: 1em;
-  padding: 0.5em 0.9em;
-  border: 2px solid #2ea043;
-  border-radius: 5px;
-  font-weight: bold;
-}
-:where(div#s3-publish-expiry.s3-publish-expired) {
-  border-color: #f85149;
+/* With the contents beside the text on a wide screen, the bar spans both
+   columns under the title, and the contents start a row lower. */
+@media screen and (min-width: 1100px) {
+  div#content:has(> #table-of-contents) > #s3-publish-expiry {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
+  div#content:has(> #s3-publish-expiry) > #table-of-contents {
+    grid-row: 3 / span 500;
+  }
 }
 </style>
 <script>
@@ -1756,18 +1767,20 @@ does not depend on `s3-publish-html-theme'; a theme can restyle
   }
   if (isNaN(expires)) { return; }
   document.addEventListener('DOMContentLoaded', function () {
-    // A line of the postamble, under its date (Org's \"Created:\", which
-    // some configurations relabel), styled like it; failing that, a box
-    // under the source link.
-    var date = document.querySelector('#postamble .date');
-    var note = document.createElement(date ? 'p' : 'div');
-    note.id = 's3-publish-expiry';
-    note.setAttribute('role', 'status');
-    var after = date || document.getElementById('org-download');
-    if (after) {
-      after.parentNode.insertBefore(note, after.nextSibling);
+    // A bar right under the title, where a reader sees it first.
+    var bar = document.createElement('div');
+    bar.id = 's3-publish-expiry';
+    bar.setAttribute('role', 'status');
+    var content = document.getElementById('content') || document.body;
+    var title = content.querySelector('.title');
+    if (title) {
+      title.parentNode.insertBefore(bar, title.nextSibling);
+      // Line up with the title banner, however the theme sets it out.
+      var style = window.getComputedStyle(title);
+      bar.style.marginLeft = style.marginLeft;
+      bar.style.marginRight = style.marginRight;
     } else {
-      (document.getElementById('content') || document.body).appendChild(note);
+      content.insertBefore(bar, content.firstChild);
     }
     var until = new Date(expires).toLocaleString(undefined, {
       dateStyle: 'medium', timeStyle: 'short' });
@@ -1775,11 +1788,9 @@ does not depend on `s3-publish-html-theme'; a theme can restyle
     function tick() {
       var left = Math.floor((expires - Date.now()) / 1000);
       if (left <= 0) {
-        note.className = 's3-publish-expired';
-        note.textContent = date
-          ? 'Link expired: ' + until + '. Ask its owner for a new one.'
-          : 'This private link expired at ' + until
-            + '. Ask its owner for a new one.';
+        bar.className = 's3-publish-expired';
+        bar.textContent = 'This private link expired ' + until
+          + '. Ask its owner for a new one.';
         clearInterval(timer);
         return;
       }
@@ -1787,11 +1798,9 @@ does not depend on `s3-publish-html-theme'; a theme can restyle
       var hours = Math.floor(left % 86400 / 3600);
       var minutes = Math.floor(left % 3600 / 60);
       var seconds = left % 60;
-      var countdown = (days ? days + 'd ' : '') + hours + 'h ' + minutes + 'm '
+      bar.textContent = 'This private link expires ' + until + ' — in '
+        + (days ? days + 'd ' : '') + hours + 'h ' + minutes + 'm '
         + seconds + 's';
-      note.textContent = date
-        ? 'Link expires: ' + until + ' (in ' + countdown + ')'
-        : 'This private link expires in ' + countdown + ' (' + until + ').';
     }
     tick();
     timer = setInterval(tick, 1000);
