@@ -670,6 +670,18 @@ The source emacs.ico is 34kB across five sizes; only the 32x32 is wanted."
 
 ;;; Footer placement
 
+(ert-deftest s3-publish-test-postamble-date-label ()
+  "The postamble dates the page Last Modified, unless told otherwise."
+  (let ((body (test-s3-publish--export-body "#+TITLE: T\n* One\n")))
+    (should (string-match-p "<p class=\"date\">Last Modified: " body))
+    (should-not (string-match-p "Created: " body)))
+  (let ((s3-publish-html-date-label "Published"))
+    (should (string-match-p "<p class=\"date\">Published: "
+                            (test-s3-publish--export-body "#+TITLE: T\n"))))
+  (let ((s3-publish-html-date-label nil))
+    (should (string-match-p "<p class=\"date\">Created: "
+                            (test-s3-publish--export-body "#+TITLE: T\n")))))
+
 (ert-deftest s3-publish-test-postamble-moves-inside-content ()
   "The postamble must sit inside #content, not beside it.
 As a sibling it spans the full width, so on a wide screen it lands under

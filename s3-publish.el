@@ -2342,6 +2342,30 @@ Does nothing when the document has no postamble or no #content div."
             (write-region (point-min) (point-max) html-file nil 'quiet))))))
   html-file)
 
+(defcustom s3-publish-html-date-label "Last Modified"
+  "Label for the date in the postamble of published pages, or nil.
+
+Org's default postamble dates the page \"Created:\", but the date is
+when the page was exported -- that is, last published -- so a page
+that is republished says it was created just now.  This label replaces
+it.  nil leaves Org's own wording."
+  :type '(choice (string :tag "Label")
+                 (const :tag "Org's own (\"Created\")" nil))
+  :group 's3-publish)
+
+(defun s3-publish--relabel-postamble-date (html-file)
+  "Relabel the postamble date of HTML-FILE with `s3-publish-html-date-label'.
+Only Org's default English \"Created:\" line is changed."
+  (when s3-publish-html-date-label
+    (with-temp-buffer
+      (insert-file-contents html-file)
+      (goto-char (point-min))
+      (when (re-search-forward "<p class=\"date\">Created: " nil t)
+        (replace-match (format "<p class=\"date\">%s: " s3-publish-html-date-label)
+                       t t)
+        (write-region (point-min) (point-max) html-file nil 'quiet))))
+  html-file)
+
 (defun s3-publish--rewrite-toc-heading (html-file)
   "Retitle the table of contents in HTML-FILE with the document's own title.
 
@@ -2523,6 +2547,7 @@ so it is expanded here while that buffer is still active."
                            (file-truename html-file)
                          html-file)))
        (s3-publish--rewrite-toc-heading html-file)
+       (s3-publish--relabel-postamble-date html-file)
        (s3-publish--move-postamble-into-content html-file)))))
 
 (defun s3-publish--org-string-export-to-html (org-text)
@@ -4836,6 +4861,7 @@ are evaluated as the export calls for, without asking."
                  (s3-publish--call-with-html-export-settings
                   (lambda () (org-export-to-file 'html html)))))))
           (s3-publish--rewrite-toc-heading html)
+          (s3-publish--relabel-postamble-date html)
           (s3-publish--move-postamble-into-content html))
       (kill-buffer buffer))))
 
