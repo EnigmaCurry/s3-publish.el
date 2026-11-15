@@ -381,6 +381,14 @@ link s3-publish appends to the bottom of every page. If you point
 =s3-publish-html-theme= at =simple_dark.css= on disk instead, you get the
 original without those additions.
 
+The built-in theme is dark by default. It also comes in light, or can
+follow each reader's own system setting:
+
+#+begin_src emacs-lisp
+  (setq s3-publish-html-color-scheme 'light) ; always light
+  (setq s3-publish-html-color-scheme 'auto)  ; light or dark, per reader
+#+end_src
+
 The theme belongs to the publisher rather than to the document, which
 is what lets Markdown be themed at all -- Markdown is exported from a
 temporary directory, so a document-relative =#+SETUPFILE:= pointing at a

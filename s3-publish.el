@@ -1352,6 +1352,72 @@ theme.  Dark only.  See `s3-publish-html-theme'.")
 
 
 
+(defconst s3-publish-html-light-style "\
+:root { color-scheme: light; }
+body { background: #f4f4f4; color: #1f2328; }
+code { color: #a0450a; }
+div#content { border-color: #d0d7de; background: #ffffff; }
+a, div#postamble a { color: #0969da; }
+a:hover, div#postamble a:hover { color: #cf222e; }
+h2 { border-bottom-color: #d0d7de; }
+h3, h4 { border-bottom-color: #e1e4e8; }
+h2 a:hover, h3 a:hover, h4 a:hover, h5 a:hover, h6 a:hover { color: #0969da; }
+h2 a:hover::after, h3 a:hover::after, h4 a:hover::after,
+h5 a:hover::after, h6 a:hover::after { color: #cf222e; }
+tt { color: #0550ae; }
+pre { background: #f6f8fa; color: #1f2328; border-bottom-color: #c9a0a0; }
+pre.src-shell { background: #eef1f4; }
+pre.src-example { background: #f0f0ee !important; }
+pre.example { background: #f0f0ee; }
+pre.src[data-lang]::before {
+	background: #eaeef2;
+	border-bottom-color: #c9a0a0;
+	color: #57606a;
+}
+.verbatim-caption { border-color: #d0d7de; background: #f6f8fa; }
+div#postamble { color: #57606a; }
+table { color: #1f2328; }
+th, td { border-color: #d0d7de; }
+th { background: #eaeef2; }
+.timestamp { color: #6e7781; }
+button.s3-publish-copy { border-color: #afb8c1; background: #f6f8fa; color: #1f2328; }
+button.s3-publish-copy:hover { border-color: #cf222e; }
+#org-download { border-top-color: #d0d7de; }
+#org-download a { border-color: #afb8c1; background: #f6f8fa; }
+#org-download a:hover { border-color: #cf222e; }
+pre .org-keyword, pre .org-preprocessor { color: #cf222e; }
+pre .org-string, pre .org-doc { color: #0a3069; }
+pre .org-comment, pre .org-comment-delimiter { color: #6e7781; }
+pre .org-function-name { color: #8250df; }
+pre .org-variable-name { color: #953800; }
+pre .org-type, pre .org-constant { color: #0550ae; }
+pre .org-builtin { color: #8250df; }
+pre .org-warning { color: #82071e; }
+#table-of-contents h2.toc-title { border-bottom-color: #d0d7de; }
+#table-of-contents h2.toc-title a { color: #1f2328; }
+#table-of-contents h2.toc-title a:hover { color: #0969da; }
+div#content > #postamble { border-top-color: #d0d7de; }
+"
+  "Overrides that turn `s3-publish-html-default-style' light.
+Only colours: the layout stays the dark theme's.  See
+`s3-publish-html-color-scheme'.")
+
+(defcustom s3-publish-html-color-scheme 'dark
+  "Whether the built-in theme is dark, light, or follows the reader.
+
+`dark'   Light text on a dark page.
+`light'  Dark text on a light page.
+`auto'   Dark or light to match the reader's system setting, through the
+         `prefers-color-scheme' media query.  Dark when a browser does
+         not say.
+
+Only applies to the built-in theme, i.e. when `s3-publish-html-theme'
+is `default'."
+  :type '(choice (const :tag "Dark" dark)
+                 (const :tag "Light" light)
+                 (const :tag "Match the reader's system" auto))
+  :group 's3-publish)
+
 (defcustom s3-publish-html-theme 'default
   "Stylesheet inlined into HTML published from Org and Markdown buffers.
 
@@ -1385,7 +1451,15 @@ Returns nil when no theme is configured."
   (let ((theme s3-publish-html-theme))
     (cond
      ((null theme) nil)
-     ((eq theme 'default) s3-publish-html-default-style)
+     ((eq theme 'default)
+      (pcase s3-publish-html-color-scheme
+        ('dark s3-publish-html-default-style)
+        ('light (concat s3-publish-html-default-style "\n"
+                        s3-publish-html-light-style))
+        ('auto (concat s3-publish-html-default-style
+                       "\n@media (prefers-color-scheme: light) {\n"
+                       s3-publish-html-light-style "}\n"))
+        (other (error "Invalid `s3-publish-html-color-scheme': %S" other))))
      ((not (stringp theme))
       (error "Invalid `s3-publish-html-theme': %S" theme))
      ;; A single-line string naming a readable file is a path; everything

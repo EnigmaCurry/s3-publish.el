@@ -444,6 +444,51 @@ Org's generated ids are content hashes that change between exports."
     (should (= open close))))
 
 
+(ert-deftest s3-publish-test-light-css-braces-balance ()
+  "The light overrides balance their braces too."
+  (let ((css s3-publish-html-light-style)
+        (open 0) (close 0))
+    (dotimes (i (length css))
+      (cond ((eq (aref css i) ?{) (setq open (1+ open)))
+            ((eq (aref css i) ?}) (setq close (1+ close)))))
+    (should (= open close))))
+
+(ert-deftest s3-publish-test-color-scheme ()
+  "The colour scheme picks dark, light, or both behind a media query."
+  (let ((s3-publish-html-theme 'default))
+    (let ((s3-publish-html-color-scheme 'dark))
+      (should (equal (s3-publish--html-css) s3-publish-html-default-style)))
+    (let* ((s3-publish-html-color-scheme 'light)
+           (css (s3-publish--html-css)))
+      (should (string-suffix-p s3-publish-html-light-style css))
+      (should-not (string-match-p "prefers-color-scheme" css)))
+    (let* ((s3-publish-html-color-scheme 'auto)
+           (css (s3-publish--html-css)))
+      (should (string-match-p
+               (concat "@media (prefers-color-scheme: light) {\n"
+                       (regexp-quote s3-publish-html-light-style) "}")
+               css)))
+    (let ((s3-publish-html-color-scheme 'sepia))
+      (should-error (s3-publish--html-css)))))
+
+(ert-deftest s3-publish-test-color-scheme-only-for-built-in-theme ()
+  "A custom theme is used as is, whatever the colour scheme."
+  (let ((s3-publish-html-theme "body { color: olive; }\nhtml {}")
+        (s3-publish-html-color-scheme 'light))
+    (should (equal (s3-publish--html-css) "body { color: olive; }\nhtml {}"))))
+
+(ert-deftest s3-publish-test-light-overrides-only-known-selectors ()
+  "Every light override restyles a selector the dark theme has."
+  (let ((dark s3-publish-html-default-style)
+        (start 0))
+    (while (string-match "^\\([^{}\n][^{}]*\\){" s3-publish-html-light-style start)
+      (setq start (match-end 0))
+      (dolist (selector (split-string (match-string 1 s3-publish-html-light-style)
+                                      "," t "[ \t\n]+"))
+        (unless (equal selector ":root")
+          (should (string-match-p (regexp-quote selector) dark)))))))
+
+
 ;;; Source blocks
 
 (defun test-s3-publish--advise-src-block (orig &rest args)
