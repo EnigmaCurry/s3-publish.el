@@ -2,7 +2,7 @@
 ;;
 ;; Author: EnigmaCurry
 ;; URL: https://github.com/EnigmaCurry/s3-publish.el
-;; Version: 0.1
+;; Version: 0.2
 ;; Package-Requires: ((emacs "26.1"))
 ;; Keywords: s3, publish
 ;; SPDX-License-Identifier: 0BSD
