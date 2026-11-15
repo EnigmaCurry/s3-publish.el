@@ -1274,4 +1274,113 @@ republished one: a lazy regexp matched across item boundaries."
         (should (= 2 (s3-publish-rebuild-feed "test")))
         (should (= 2 (test-s3-publish--count "<item>" (test-s3-publish--object "index.xml"))))))))
 
+;;; Per-document link expiry
+
+(ert-deftest s3-publish-test-document-link-expiry-setting ()
+  "Documents set their link expiry by Org keyword or Markdown front matter."
+  (should (eq (s3-publish--document-link-expiry "#+TITLE: T\n\nBody.\n") 'default))
+  (should (equal (s3-publish--document-link-expiry
+                  "#+TITLE: T\n#+S3_PUBLISH_LINK_EXPIRY: 2d\n") "2d"))
+  (should (equal (s3-publish--document-link-expiry
+                  "#+s3_publish_link_expiry:   12h  \n") "12h"))
+  (should-not (s3-publish--document-link-expiry "#+S3_PUBLISH_LINK_EXPIRY: nil\n"))
+  (should-not (s3-publish--document-link-expiry "#+S3_PUBLISH_LINK_EXPIRY: none\n"))
+  (should (equal (s3-publish--document-link-expiry
+                  "---\ntitle: T\ns3_publish_link_expiry: 1d\n---\n# Body\n") "1d"))
+  (should (equal (s3-publish--document-link-expiry
+                  "---\ns3_publish_link_expiry: \"3h\"\n---\nBody\n") "3h"))
+  ;; Only front matter counts, not a line in the body.
+  (should (eq (s3-publish--document-link-expiry
+               "# Title\n\ns3_publish_link_expiry: 1d\n") 'default))
+  ;; Seven days at most, and something more than nothing.
+  (should (equal (s3-publish--document-link-expiry "#+S3_PUBLISH_LINK_EXPIRY: 7d\n") "7d"))
+  (should (equal (s3-publish--document-link-expiry "#+S3_PUBLISH_LINK_EXPIRY: 1w\n") "1w"))
+  (should-error (s3-publish--document-link-expiry "#+S3_PUBLISH_LINK_EXPIRY: 8d\n")
+                :type 'user-error)
+  (should-error (s3-publish--document-link-expiry "#+S3_PUBLISH_LINK_EXPIRY: 604801\n")
+                :type 'user-error)
+  (should-error (s3-publish--document-link-expiry "#+S3_PUBLISH_LINK_EXPIRY: 0\n")
+                :type 'user-error)
+  (should-error (s3-publish--document-link-expiry "#+S3_PUBLISH_LINK_EXPIRY: soon\n")
+                :type 'user-error)
+  ;; A provider allowing longer can raise the limit.
+  (let ((s3-publish-signed-url-max-expiry "30d"))
+    (should (equal (s3-publish--document-link-expiry
+                    "#+S3_PUBLISH_LINK_EXPIRY: 30d\n") "30d"))))
+
+(defmacro test-s3-publish-private (&rest body)
+  "Run BODY with the test profile private."
+  (declare (indent 0) (debug t))
+  `(let ((s3-publish-profiles
+          (list (plist-put (copy-sequence test-s3-publish--profile)
+                           :public-acl nil)))
+         (s3-publish-signed-url-expiry "7d"))
+     ,@body))
+
+(ert-deftest s3-publish-test-org-keyword-sets-link-expiry ()
+  "A private Org document's keyword sets how long all its links work."
+  (test-s3-publish-with-fake-s3
+    (test-s3-publish-private
+      (test-s3-publish-with-file org "doc.org"
+          "#+TITLE: Doc\n#+S3_PUBLISH_LINK_EXPIRY: 2d\n\nHi.\n"
+        (with-current-buffer (find-file-noselect org)
+          (unwind-protect
+              (let ((url (s3-publish-org-buffer)))
+                (should (string-match-p "Expires=\\+172800" url))
+                ;; The source link inside the page, too.
+                (should (string-match-p
+                         (regexp-quote (concat (test-s3-publish--key org)
+                                               "?Expires=+172800"))
+                         (test-s3-publish--object (test-s3-publish--key org ".html")))))
+            (kill-buffer)))))))
+
+(ert-deftest s3-publish-test-markdown-front-matter-sets-link-expiry ()
+  "A private Markdown document's front matter sets its link expiry."
+  (test-s3-publish-with-fake-s3
+    (test-s3-publish-private
+      (test-s3-publish-with-file md "doc.md"
+          "---\ntitle: Doc\ns3_publish_link_expiry: 1h\n---\n\nHi.\n"
+        (should (string-match-p "Expires=\\+3600"
+                                (plist-get (s3-publish-api-publish md "test") :url)))
+        (with-current-buffer (find-file-noselect md)
+          (unwind-protect
+              (should (string-match-p "Expires=\\+3600" (s3-publish-markdown-buffer)))
+            (kill-buffer)))))))
+
+(ert-deftest s3-publish-test-link-expiry-nil-hands-out-s3-uri ()
+  "A document saying nil gets the s3:// URI, whatever the default."
+  (test-s3-publish-with-fake-s3
+    (test-s3-publish-private
+      (test-s3-publish-with-file org "doc.org"
+          "#+TITLE: Doc\n#+S3_PUBLISH_LINK_EXPIRY: nil\n"
+        (should (string-prefix-p "s3://bkt/"
+                                 (plist-get (s3-publish-api-publish org "test")
+                                            :url)))))))
+
+(ert-deftest s3-publish-test-too-long-link-expiry-uploads-nothing ()
+  "A document asking for more than seven days fails before uploading."
+  (test-s3-publish-with-fake-s3
+    (test-s3-publish-private
+      (test-s3-publish-with-file org "doc.org"
+          "#+TITLE: Doc\n#+S3_PUBLISH_LINK_EXPIRY: 30d\n"
+        (with-current-buffer (find-file-noselect org)
+          (unwind-protect
+              (let ((err (should-error (s3-publish-org-buffer) :type 'user-error)))
+                (should (string-match-p "longer than 7d" (cadr err))))
+            (kill-buffer)))
+        (should-error (s3-publish-api-publish org "test") :type 'user-error)
+        (should-not (test-s3-publish--log))))))
+
+(ert-deftest s3-publish-test-signing-refuses-more-than-seven-days ()
+  "No signed URL is made for longer than the limit, however it is asked for."
+  (test-s3-publish-with-fake-s3
+    (should-error (s3-publish-sign-url "test" "k.html" "8d") :type 'user-error)
+    (should (s3-publish-sign-url "test" "k.html" "7d"))
+    ;; A too-long default is caught when publishing privately.
+    (test-s3-publish-private
+      (let ((s3-publish-signed-url-expiry "30d"))
+        (with-temp-buffer
+          (insert "x")
+          (should-error (s3-publish-buffer) :type 'user-error))))))
+
 (provide 'test-s3-publish-network)

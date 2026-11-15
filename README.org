@@ -611,9 +611,28 @@ work, or go back to =s3://= URIs, which only someone holding your
 credentials can use:
 
 #+begin_src emacs-lisp
-  (setq s3-publish-signed-url-expiry "30d") ; a number, then s, m, h, d or w
+  (setq s3-publish-signed-url-expiry "3d")  ; a number, then s, m, h, d or w
   (setq s3-publish-signed-url-expiry nil)   ; s3:// URIs
 #+end_src
+
+A document can set its own, which republishing, on-save mode and live
+edits all keep to -- in Org with a keyword, in Markdown in its front
+matter:
+
+#+begin_src org
+  ,#+S3_PUBLISH_LINK_EXPIRY: 2d
+#+end_src
+
+#+begin_src markdown
+  ---
+  s3_publish_link_expiry: 2d
+  ---
+#+end_src
+
+=nil= there means an =s3://= URI for that document. Seven days is the
+longest a signed URL works on DigitalOcean (and AWS), so a longer
+expiry is an error rather than a link that dies early; for a provider
+that allows more, raise =s3-publish-signed-url-max-expiry=.
 
 A page opened through a signed link says so at the bottom, in green,
 with a countdown to when the link stops working; if the page is left

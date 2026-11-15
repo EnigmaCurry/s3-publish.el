@@ -1947,6 +1947,11 @@ afresh.
 nil hands out the s3:// URI instead, which only someone with your
 credentials can use.
 
+A document can set its own: `#+S3_PUBLISH_LINK_EXPIRY: 2d' in Org,
+`s3_publish_link_expiry: 2d' in Markdown front matter, nil for an s3://
+URI.  No duration may exceed `s3-publish-signed-url-max-expiry', seven
+days, the most DigitalOcean allows.
+
 The signature is made by `s3cmd signurl', which uses AWS signature
 version 2.  DigitalOcean Spaces, MinIO and most S3 work-alikes accept
 it; AWS regions opened since 2014 do not.  See also
@@ -1965,8 +1970,37 @@ it; AWS regions opened since 2014 do not.  See also
        (pcase (match-string 2 duration)
          ((or "" "s") 1) ("m" 60) ("h" 3600) ("d" 86400) ("w" 604800)))))
 
+(defcustom s3-publish-signed-url-max-expiry "7d"
+  "The longest a signed URL may work for, as a duration like \"7d\".
+DigitalOcean Spaces, like AWS, refuses to honour a signed URL for
+longer than seven days, so s3-publish refuses to make one: a longer
+`s3-publish-signed-url-expiry', `#+S3_PUBLISH_LINK_EXPIRY:' or
+`s3-publish-sign-url' duration is an error rather than a link that
+stops working sooner than promised.  Raise it only for a provider that
+allows more."
+  :type 'string
+  :group 's3-publish)
+
+(defun s3-publish--check-link-expiry (duration &optional source)
+  "Return DURATION in seconds, or signal an error if no link may last that long.
+SOURCE says where DURATION came from, for the error message."
+  (let ((seconds (s3-publish--parse-duration duration))
+        (most (s3-publish--parse-duration s3-publish-signed-url-max-expiry)))
+    (cond
+     ((<= seconds 0)
+      (user-error "%sLink expiry %s is not a duration"
+                  (if source (concat source ": ") "") duration))
+     ((> seconds most)
+      (user-error "%sLink expiry %s is longer than %s, the longest a signed \
+URL works for (see `s3-publish-signed-url-max-expiry')"
+                  (if source (concat source ": ") "") duration
+                  s3-publish-signed-url-max-expiry)))
+    seconds))
+
 (defun s3-publish--signed-url (profile key seconds)
-  "Return an https URL for KEY in PROFILE's bucket that works for SECONDS."
+  "Return an https URL for KEY in PROFILE's bucket that works for SECONDS.
+Signals an error when SECONDS is over `s3-publish-signed-url-max-expiry'."
+  (s3-publish--check-link-expiry (number-to-string seconds))
   (let ((output (s3-publish--s3cmd-or-error
                  profile "Signing a URL" "signurl"
                  (format "s3://%s/%s" (plist-get profile :bucket) key)
@@ -1976,6 +2010,40 @@ it; AWS regions opened since 2014 do not.  See also
     ;; s3cmd prints http:// whatever the config says.  The scheme is not
     ;; part of the signature, so the same URL works over https.
     (concat "https" (substring (match-string 0 output) (length (match-string 1 output))))))
+
+(defun s3-publish--document-link-expiry (text)
+  "Return the link expiry the document TEXT asks for, or `default'.
+TEXT is Org, with a `#+S3_PUBLISH_LINK_EXPIRY:' keyword, or Markdown,
+with `s3_publish_link_expiry:' in its front matter.  The value is a
+duration, checked against `s3-publish-signed-url-max-expiry', or nil
+for nil or none: hand out s3:// URIs.  `default' when TEXT sets none."
+  (let* ((case-fold-search t)
+         (value
+          (or (and (string-match
+                    "^[ \t]*#\\+S3_PUBLISH_LINK_EXPIRY:[ \t]*\\(.*?\\)[ \t]*$" text)
+                   (match-string 1 text))
+              ;; Only in front matter: a --- block opening the document.
+              (and (string-match "\\`---[ \t]*\n\\(\\(?:.*\n\\)*?\\)\\(?:---\\|\\.\\.\\.\\)[ \t]*$"
+                                 text)
+                   (let ((front (match-string 1 text)))
+                     (and (string-match
+                           "^s3_publish_link_expiry:[ \t]*[\"']?\\([^\"'\n]*?\\)[\"']?[ \t]*$"
+                           front)
+                          (match-string 1 front)))))))
+    (cond
+     ((null value) 'default)
+     ((member (downcase value) '("nil" "none")) nil)
+     (t (s3-publish--check-link-expiry value "S3_PUBLISH_LINK_EXPIRY")
+        value))))
+
+(defun s3-publish--with-document-link-expiry (text fn)
+  "Call FN with the links it hands out signed as the document TEXT asks.
+See `s3-publish--document-link-expiry'."
+  (let* ((asked (s3-publish--document-link-expiry text))
+         (s3-publish-signed-url-expiry (if (eq asked 'default)
+                                           s3-publish-signed-url-expiry
+                                         asked)))
+    (funcall fn)))
 
 (defun s3-publish--shareable-url (profile key)
   "Return the URL to hand out for KEY in PROFILE's bucket.
@@ -2499,6 +2567,8 @@ The buffer is tangled first when `s3-publish-org-tangle' says to."
   (let ((org-file (buffer-file-name)))
     (unless org-file
       (error "Current org buffer is not visiting a file"))
+    ;; Checked first, so a bad expiry fails before anything is tangled.
+    (s3-publish--document-link-expiry (buffer-string))
     (unless s3-publish--on-save
       (s3-publish--org-maybe-tangle))
     (let ((title (or (save-excursion
@@ -2513,10 +2583,13 @@ The buffer is tangled first when `s3-publish-org-tangle' says to."
                            (format "Published on %s"
                                    (format-time-string "%Y-%m-%d %H:%M"))))
           (buffer (current-buffer)))
-      (s3-publish--publish-document
-       org-file
-       (lambda () (with-current-buffer buffer (s3-publish--export-buffer-to-html)))
-       title description "Org source"))))
+      (s3-publish--with-document-link-expiry
+       (buffer-string)
+       (lambda ()
+         (s3-publish--publish-document
+          org-file
+          (lambda () (with-current-buffer buffer (s3-publish--export-buffer-to-html)))
+          title description "Org source"))))))
 
 
 ;;; Republishing on save ------------------------------------------------------
@@ -3099,10 +3172,13 @@ to a published Org buffer."
                                  (match-string 1 org-text))
                             (format "Published on %s"
                                     (format-time-string "%Y-%m-%d %H:%M")))))
-      (s3-publish--publish-document
-       md-file
-       (lambda () (s3-publish--org-string-export-to-html org-text))
-       title description "Markdown source" t))))
+      (s3-publish--with-document-link-expiry
+       markdown
+       (lambda ()
+         (s3-publish--publish-document
+          md-file
+          (lambda () (s3-publish--org-string-export-to-html org-text))
+          title description "Markdown source" t))))))
 
 
 ;;; Removal of published documents --------------------------------------------
@@ -4774,19 +4850,22 @@ its :status is `done' or `failed'."
                      (buffer-string)))
              (org-p (equal (downcase (file-name-extension file)) "org"))
              (org-text (if org-p text (s3-publish--markdown-to-org-string text)))
-             (url (s3-publish--publish-document
-                   file
-                   (if org-p
-                       (lambda () (s3-publish--org-file-export-to-html file run-code))
-                     (lambda ()
-                       (s3-publish--without-babel-evaluation
-                        (lambda () (s3-publish--org-string-export-to-html org-text)))))
-                   (or title
-                       (s3-publish--file-keyword org-text "TITLE")
-                       (file-name-nondirectory file))
-                   (or (s3-publish--file-keyword org-text "DESCRIPTION") stamp)
-                   (if org-p "Org source" "Markdown source")
-                   t)))
+             (url (s3-publish--with-document-link-expiry
+                   text
+                   (lambda ()
+                     (s3-publish--publish-document
+                      file
+                      (if org-p
+                          (lambda () (s3-publish--org-file-export-to-html file run-code))
+                        (lambda ()
+                          (s3-publish--without-babel-evaluation
+                           (lambda () (s3-publish--org-string-export-to-html org-text)))))
+                      (or title
+                          (s3-publish--file-keyword org-text "TITLE")
+                          (file-name-nondirectory file))
+                      (or (s3-publish--file-keyword org-text "DESCRIPTION") stamp)
+                      (if org-p "Org source" "Markdown source")
+                      t)))))
         (s3-publish--api-result
          url (list (concat (file-name-sans-extension key) ".html") key)
          s3-publish--uploaded-images)))))
