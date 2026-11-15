@@ -51,6 +51,13 @@ stdout. A failure exits non-zero with `{"error": "..."}`.
   URI (or a signed URL, if the user configured that); use `s3p sign` for
   a shareable link that expires.
 
+- **Self-emptying buckets.** A profile with a `lifetime` (shown by
+  `s3p profiles`, e.g. `7d`) is a bucket whose lifecycle rule deletes
+  everything that long after upload. Its links are never longer than
+  the object has left, so a link signed for an older object may be
+  shorter than asked: report the expiry the URL actually has. Tell the
+  user that what they publish there is temporary.
+
 ## Code in Org documents — off unless the user says so
 
 By default **no code is run**: source blocks are published as written,

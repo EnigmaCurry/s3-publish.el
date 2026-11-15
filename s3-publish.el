@@ -597,6 +597,9 @@ Each profile is an alist containing the following keys:
   - :rss-title  The title of the RSS feed.
   - :rss-desc   The description of the RSS feed.
   - :rss-link   The base URL for the RSS feed (usually the bucket URL).
+  - :lifetime   How long the bucket keeps an object, when a lifecycle rule
+                deletes objects, e.g. \"7d\".  Signed links are then never
+                longer than an object has left.
 The auth-source machine name will be derived by prepending \"s3-publish-\" to
 the profile name.
 Example:
@@ -639,6 +642,8 @@ If the buffer does not exist, it is created."
                      (plist-get p :bucket)
                      (if (plist-get p :public-acl) "Yes" "No")
                      (or (plist-get p :salt) "Not set")))
+            (insert (format "Lifetime: %s\n"
+                            (or (plist-get p :lifetime) "Kept until removed")))
             (let ((rss-feed (plist-get p :rss-feed)))
               (insert (format "RSS Feed: %s\n" (if rss-feed "Yes" "No")))
               (when rss-feed
@@ -653,6 +658,19 @@ If the buffer does not exist, it is created."
   (display-buffer s3-publish-profiles-buffer))
 
 ;; Extend profile add function to include RSS settings
+(defun s3-publish--read-lifetime (current)
+  "Ask how long the bucket keeps objects; CURRENT is the present answer.
+Returns a duration such as \"7d\", or nil for a bucket that keeps them."
+  (let ((answer (string-trim
+                 (read-string
+                  (format "Does a lifecycle rule delete objects after a time? \
+Duration (e.g. 7d), or empty if not%s: "
+                          (if current (format " (current: %s)" current) ""))
+                  nil nil (or current "")))))
+    (unless (string-empty-p answer)
+      (s3-publish--parse-duration answer)
+      answer)))
+
 (defun s3-publish-add-profile ()
   "Add a new s3-publish profile interactively.
 Generates a random salt (an 8-character string) and stores it with the profile."
@@ -663,12 +681,14 @@ Generates a random salt (an 8-character string) and stores it with the profile."
          (salt (substring (md5 (format "%s-%d" (current-time-string) (random)))
                           0 32))
          (rss-feed (y-or-n-p "Maintain an RSS feed for published files? "))
-         (new-profile (list :name name
-                            :endpoint endpoint
-                            :bucket bucket
-                            :public-acl public-acl
-                            :salt salt
-                            :rss-feed rss-feed)))
+         (lifetime (s3-publish--read-lifetime nil))
+         (new-profile (append (list :name name
+                                    :endpoint endpoint
+                                    :bucket bucket
+                                    :public-acl public-acl
+                                    :salt salt
+                                    :rss-feed rss-feed)
+                              (and lifetime (list :lifetime lifetime)))))
 
     ;; If RSS feed is enabled, prompt for additional settings
     (when rss-feed
@@ -717,12 +737,17 @@ Generates a random salt (an 8-character string) and stores it with the profile."
                 (y-or-n-p (format "Maintain RSS feed? (current: %s): "
                                   (if rss-enabled "Yes" "No"))))
                ;; Retain the existing salt
-               (edited-profile (list :name name
-                                     :endpoint new-endpoint
-                                     :bucket new-bucket
-                                     :public-acl new-public-acl
-                                     :salt (plist-get profile :salt)
-                                     :rss-feed new-rss-feed)))
+               (new-lifetime (s3-publish--read-lifetime
+                              (plist-get profile :lifetime)))
+               (edited-profile (append
+                                (list :name name
+                                      :endpoint new-endpoint
+                                      :bucket new-bucket
+                                      :public-acl new-public-acl
+                                      :salt (plist-get profile :salt)
+                                      :rss-feed new-rss-feed)
+                                (and new-lifetime
+                                     (list :lifetime new-lifetime)))))
 
           ;; If RSS feed is newly enabled or was already enabled
           (when new-rss-feed
@@ -2121,15 +2146,65 @@ See `s3-publish--document-link-expiry'."
                                          asked)))
     (funcall fn)))
 
-(defun s3-publish--shareable-url (profile key)
+(defun s3-publish--object-modified (profile key)
+  "Return when KEY in PROFILE's bucket was last uploaded, or nil if unknown."
+  (let ((result (s3-publish--s3cmd
+                 profile "info" (format "s3://%s/%s" (plist-get profile :bucket) key))))
+    ;; Not the exit status: s3cmd prints the object's details, then fails
+    ;; when the key may not read the bucket policy, as a limited key may not.
+    (when (string-match "Last mod:[ \t]*\\(.+?\\)[ \t]*$" (cdr result))
+      (ignore-errors (date-to-time (match-string 1 (cdr result)))))))
+
+(defun s3-publish--link-seconds (profile key seconds &optional existing)
+  "Return SECONDS, cut short to the time KEY has left in PROFILE's bucket.
+
+A bucket whose lifecycle rule deletes objects some time after upload is
+described by the profile's :lifetime, e.g. \"7d\".  A link outliving its
+object would promise -- and its page would count down to -- a time the
+object no longer exists by, so no link is longer than the object has
+left: its lifetime when it is being uploaded now, and with EXISTING, its
+lifetime less the time since it was last uploaded.  Lifecycle rules
+round up, and delete late, so this is never later than the object is
+really deleted.  Signals an error when the object's time is up."
+  (let ((lifetime (plist-get profile :lifetime)))
+    (if (not lifetime)
+        seconds
+      (let* ((life (s3-publish--parse-duration lifetime))
+             (modified (and existing (s3-publish--object-modified profile key)))
+             (left (if modified
+                       (floor (- (+ (float-time modified) life) (float-time)))
+                     life)))
+        (when (< left 60)
+          (user-error "%s is due to be deleted by the bucket's %s lifetime; \
+republish it for a new link" key lifetime))
+        (min seconds left)))))
+
+(defun s3-publish--format-seconds (seconds)
+  "Return SECONDS as a short duration, e.g. \"6d 4h\" or \"45m\"."
+  (let ((days (/ seconds 86400))
+        (hours (/ (% seconds 86400) 3600))
+        (minutes (/ (% seconds 3600) 60)))
+    (string-join (delq nil (list (and (> days 0) (format "%dd" days))
+                                 (and (> hours 0) (format "%dh" hours))
+                                 (and (or (> minutes 0) (= seconds (% seconds 60)))
+                                      (format "%dm" (max minutes 1)))))
+                 " ")))
+
+(defun s3-publish--shareable-url (profile key &optional existing)
   "Return the URL to hand out for KEY in PROFILE's bucket.
 That is its public URL, or a signed one for a private bucket when
-`s3-publish-signed-url-expiry' is set, and otherwise its s3:// URI."
+`s3-publish-signed-url-expiry' is set, and otherwise its s3:// URI.
+A signed URL is cut short to the time KEY has left, as
+`s3-publish--link-seconds' explains; EXISTING says KEY is not being
+uploaded now but was earlier."
   (if (or (plist-get profile :public-acl)
           (null s3-publish-signed-url-expiry))
       (s3-publish--object-url profile key)
     (s3-publish--signed-url
-     profile key (s3-publish--parse-duration s3-publish-signed-url-expiry))))
+     profile key
+     (s3-publish--link-seconds
+      profile key (s3-publish--parse-duration s3-publish-signed-url-expiry)
+      existing))))
 
 (defun s3-publish--buffer-key (profile)
   "Return the key the current buffer's file is published under in PROFILE.
@@ -2153,8 +2228,9 @@ defaults to what the current buffer is published as.  DURATION is a
 number of seconds or e.g. \"12h\" or \"7d\"; see
 `s3-publish-signed-url-expiry'.
 
-The URL is signed locally: nothing is checked or uploaded, so it is
-not an error to sign a key that does not exist."
+The URL is signed locally and nothing is uploaded.  On a profile with a
+:lifetime, the link is cut short to the time the object has left before
+the bucket deletes it."
   (interactive
    (let* ((name (s3-publish--read-profile-name))
           (profile (s3-publish-get-profile name))
@@ -2173,10 +2249,14 @@ not an error to sign a key that does not exist."
          (key (if (string-match-p "\\`[a-zA-Z][a-zA-Z0-9+.-]*://" object)
                   (s3-publish--url-key profile object)
                 (string-remove-prefix "/" object)))
-         (url (s3-publish--signed-url profile key
-                                      (s3-publish--parse-duration duration))))
+         (asked (s3-publish--check-link-expiry duration))
+         (seconds (s3-publish--link-seconds profile key asked t))
+         (url (s3-publish--signed-url profile key seconds)))
     (kill-new url)
-    (message "Signed URL (copied, valid for %s): %s" duration url)
+    (if (< seconds asked)
+        (message "Signed URL (copied, valid for %s, when the bucket deletes it): %s"
+                 (s3-publish--format-seconds seconds) url)
+      (message "Signed URL (copied, valid for %s): %s" duration url))
     url))
 
 (defvar s3-publish--on-save nil
@@ -2295,14 +2375,36 @@ That is HTML-FILE, and the directory it is in when that is one made by
 (defun s3-publish--transfer-document (profile uploads url title description)
   "Upload a document's files to PROFILE's bucket, then list it.
 UPLOADS is a list of (FILE KEY MIME-TYPE), MIME-TYPE nil to let s3cmd
-guess.  URL, TITLE and DESCRIPTION make the document's entry in the RSS
-feed and HTML index, when the profile keeps them.  Returns URL."
+guess; FILE nil uploads what is at KEY again, as it is, see
+`s3-publish--refresh-object'.  URL, TITLE and DESCRIPTION make the
+document's entry in the RSS feed and HTML index, when the profile keeps
+them.  Returns URL."
   (dolist (upload uploads)
-    (s3-publish--put profile (nth 0 upload) (nth 1 upload) (nth 2 upload) t))
+    (if (nth 0 upload)
+        (s3-publish--put profile (nth 0 upload) (nth 1 upload) (nth 2 upload) t)
+      (s3-publish--refresh-object profile (nth 1 upload))))
   (when (and (plist-get profile :rss-feed)
              (plist-get profile :public-acl))
     (s3-publish-update-feed profile url title description))
   url)
+
+(defun s3-publish--refresh-object (profile key)
+  "Upload KEY in PROFILE's bucket again, unchanged, restarting its lifetime.
+For a bucket whose lifecycle rule deletes objects some time after they
+are uploaded.  An object already gone is reported, not an error."
+  (let ((file (make-temp-file "s3-publish-refresh-" nil
+                              (file-name-extension key t))))
+    (unwind-protect
+        (if (zerop (car (s3-publish--s3cmd
+                         profile "get" "--force"
+                         (format "s3://%s/%s" (plist-get profile :bucket) key)
+                         file)))
+            (s3-publish--put profile file key
+                             (cdr (assoc (downcase (or (file-name-extension key) ""))
+                                         s3-publish--image-media-types))
+                             t)
+          (message "s3-publish: %s is no longer in the bucket" key))
+      (s3-publish--delete-if-exists file))))
 
 (defun s3-publish--content-end-position ()
   "Return the position just before the `</div>' that closes the #content div.
@@ -2504,7 +2606,8 @@ Relative image links are resolved against DIRECTORY, the directory of
 the document's source.  See `s3-publish-html-local-images' for what is
 done to them; PROFILE gives the URL of an uploaded image.
 
-Returns the images to upload, as a list of (FILE . KEY)."
+Returns the images to upload, as a list of (FILE . KEY); FILE is nil
+for an image already in the bucket, to upload again as it is."
   (let ((uploads nil))
     (when s3-publish-html-local-images
       (with-temp-buffer
@@ -2520,22 +2623,42 @@ Returns the images to upload, as a list of (FILE . KEY)."
                ((null file))
                ((and (not (file-readable-p file)) previous)
                 ;; Not here, but published before: keep what was published.
-                (replace-match (s3-publish--image-src previous src) t t nil 1)
+                ;; An image in the bucket gets a link of its own again,
+                ;; rather than the old page's, which may be signed and
+                ;; expire with it; on a bucket that deletes objects, it is
+                ;; uploaded again too, so it lives as long as the page.
+                (let* (key
+                       (new-src
+                        ;; Matching here would clobber the match being
+                        ;; replaced.
+                        (save-match-data
+                          (setq key (ignore-errors
+                                      (s3-publish--url-key
+                                       profile (s3-publish--html-unescape previous))))
+                          (s3-publish--image-src
+                           (if key (s3-publish--shareable-url profile key) previous)
+                           src))))
+                  (when (and key (plist-get profile :lifetime))
+                    (unless (rassoc key uploads)
+                      (push (cons nil key) uploads)))
+                  (replace-match new-src t t nil 1))
                 (setq modified t))
                ((not (file-readable-p file))
                 (display-warning 's3-publish
                                  (format "Cannot read image %s; left as is" file)))
                (t
-                (let ((uri (and (eq s3-publish-html-local-images 'inline)
-                                (<= (file-attribute-size (file-attributes file))
-                                    s3-publish-html-inline-image-max-size)
-                                (s3-publish--file-data-uri file))))
-                  (unless uri
-                    (let ((key (s3-publish-get-file-key
-                                file (plist-get profile :salt))))
-                      (unless (assoc file uploads)
-                        (push (cons file key) uploads))
-                      (setq uri (s3-publish--shareable-url profile key))))
+                ;; Signing a URL matches regexps, which would clobber the
+                ;; match being replaced.
+                (let ((uri (save-match-data
+                             (or (and (eq s3-publish-html-local-images 'inline)
+                                      (<= (file-attribute-size (file-attributes file))
+                                          s3-publish-html-inline-image-max-size)
+                                      (s3-publish--file-data-uri file))
+                                 (let ((key (s3-publish-get-file-key
+                                             file (plist-get profile :salt))))
+                                   (unless (assoc file uploads)
+                                     (push (cons file key) uploads))
+                                   (s3-publish--shareable-url profile key))))))
                   (replace-match (s3-publish--image-src uri src) t t nil 1)
                   (setq modified t))))))
           (when modified
@@ -4057,7 +4180,8 @@ for an hour."
         (key (s3-publish-list--key)))
     (browse-url (if (plist-get profile :public-acl)
                     (s3-publish--object-url profile key)
-                  (s3-publish--signed-url profile key 3600)))))
+                  (s3-publish--signed-url
+                   profile key (s3-publish--link-seconds profile key 3600 t))))))
 
 (defun s3-publish-list-copy-url ()
   "Copy the URL of the file at point.
@@ -4065,7 +4189,7 @@ For a private bucket that is a signed URL when
 `s3-publish-signed-url-expiry' is set, and the s3:// URI otherwise."
   (interactive)
   (let ((url (s3-publish--shareable-url (s3-publish-list--profile)
-                                        (s3-publish-list--key))))
+                                        (s3-publish-list--key) t)))
     (kill-new url)
     (message "Copied %s" url)))
 
@@ -4814,7 +4938,8 @@ should ask, not guess.  See `s3-publish-api-profiles'."
 (defun s3-publish-api-profiles ()
   "Return the s3-publish profiles, as plists.
 Each has :name, :bucket, :endpoint, :public (whether files are public),
-:feed (whether it keeps an RSS feed and HTML index) and :last-used (the
+:feed (whether it keeps an RSS feed and HTML index), :lifetime (how
+long the bucket keeps an object, or nil) and :last-used (the
 profile last chosen at a profile prompt, a hint and never a default).
 Credentials are not included."
   (let ((default (s3-publish--default-profile-name (s3-publish--profile-names))))
@@ -4824,6 +4949,7 @@ Credentials are not included."
                     :endpoint (plist-get profile :endpoint)
                     :public (and (plist-get profile :public-acl) t)
                     :feed (and (plist-get profile :rss-feed) t)
+                    :lifetime (plist-get profile :lifetime)
                     :last-used (equal (plist-get profile :name) default)))
             s3-publish-profiles)))
 
@@ -5091,7 +5217,8 @@ an error; it returns nil."
   "Return a signed URL for TARGET that works for DURATION.
 TARGET is a URL, an s3:// URI, a key, or the absolute path of a
 published file (whose HTML page is signed, for a document).  DURATION
-is a number of seconds or e.g. \"12h\" or \"7d\"."
+is a number of seconds or e.g. \"12h\" or \"7d\"; on a profile with a
+:lifetime, the link is cut short to the time the object has left."
   (let* ((profile (s3-publish--api-profile profile-name))
          (key (cond
                ((string-match-p "\\`[a-zA-Z][a-zA-Z0-9+.-]*://" target)
@@ -5102,7 +5229,10 @@ is a number of seconds or e.g. \"12h\" or \"7d\"."
                       (concat (file-name-sans-extension key) ".html")
                     key)))
                (t target))))
-    (s3-publish--signed-url profile key (s3-publish--parse-duration duration))))
+    (s3-publish--signed-url
+     profile key
+     (s3-publish--link-seconds
+      profile key (s3-publish--check-link-expiry duration) t))))
 
 
 (provide 's3-publish)

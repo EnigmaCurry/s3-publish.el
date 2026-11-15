@@ -752,7 +752,7 @@ an error, since saving must not prompt."
     (let ((s3-publish-profile-history '("test")))
       (should (equal (s3-publish-api-profiles)
                      '((:name "test" :bucket "bkt" :endpoint "fake-endpoint"
-                              :public t :feed t :last-used t)))))))
+                              :public t :feed t :lifetime nil :last-used t)))))))
 
 (ert-deftest s3-publish-test-api-needs-a-profile-and-a-real-file ()
   "No profile, a relative path or a missing file is an error, not a guess."
@@ -1499,5 +1499,114 @@ republished one: a lazy regexp matched across item boundaries."
         ;; --name and --title are also Emacs options; they must reach s3p.
         (should (string-match-p "<title>Given title</title>"
                                 (test-s3-publish--object "index.xml")))))))
+
+;;; Buckets that delete objects
+
+(defmacro test-s3-publish-with-lifetime (lifetime &rest body)
+  "Run BODY with the test profile private, its bucket keeping objects LIFETIME."
+  (declare (indent 1) (debug t))
+  `(let ((s3-publish-profiles
+          (list (append (plist-put (copy-sequence test-s3-publish--profile)
+                                   :public-acl nil)
+                        (list :lifetime ,lifetime))))
+         (s3-publish-signed-url-expiry "7d"))
+     ,@body))
+
+(defun test-s3-publish--age-object (key seconds)
+  "Make KEY in the fake bucket look uploaded SECONDS ago."
+  (set-file-times (expand-file-name (concat "objects/bkt/" key) test-s3-publish--root)
+                  (time-subtract nil seconds)))
+
+(defun test-s3-publish--expires (url)
+  "Return the +SECONDS a fake signed URL is valid for."
+  (and (string-match "Expires=\\+\\([0-9]+\\)" url)
+       (string-to-number (match-string 1 url))))
+
+(ert-deftest s3-publish-test-private-image-upload ()
+  "An image uploaded beside a private page gets a signed link.
+Signing used to clobber the regexp match the image's src was replaced
+by, failing the publish."
+  (test-s3-publish-with-fake-s3
+    (test-s3-publish-private
+      (test-s3-publish-with-file org "doc.org" "#+TITLE: D\n\n[[file:a.png]]\n"
+        (let ((png (expand-file-name "a.png" (file-name-directory org)))
+              (s3-publish-html-local-images 'upload))
+          (test-s3-publish--write-png png)
+          (s3-publish-api-publish org "test")
+          (should (string-match-p
+                   (regexp-quote (concat (test-s3-publish--key png) "?Expires=+604800"))
+                   (test-s3-publish--object (test-s3-publish--key org ".html")))))))))
+
+(ert-deftest s3-publish-test-lifetime-caps-links-to-existing-objects ()
+  "A link to an object signed later is cut to the time it has left."
+  (test-s3-publish-with-fake-s3
+    (test-s3-publish-with-lifetime "7d"
+      (test-s3-publish-with-file txt "a.txt" "a"
+        (let* ((key (test-s3-publish--key txt))
+               (url (plist-get (s3-publish-api-publish txt "test") :url)))
+          ;; Freshly published: the whole week.
+          (should (= (test-s3-publish--expires url) 604800))
+          ;; Five days on, a new week-long link gets the two days left.
+          (test-s3-publish--age-object key (* 5 86400))
+          (let ((left (test-s3-publish--expires (s3-publish-sign-url "test" key "7d"))))
+            (should (<= (- (* 2 86400) 120) left (* 2 86400))))
+          (let ((left (test-s3-publish--expires (s3-publish-api-sign txt "7d" "test"))))
+            (should (<= (- (* 2 86400) 120) left (* 2 86400))))
+          ;; A shorter link than that is left alone.
+          (should (= (test-s3-publish--expires (s3-publish-sign-url "test" key "1h")) 3600))
+          ;; Past its lifetime: no link at all.
+          (test-s3-publish--age-object key (* 8 86400))
+          (should-error (s3-publish-sign-url "test" key "1h") :type 'user-error)
+          ;; Republishing restarts the clock.
+          (should (= (test-s3-publish--expires
+                      (plist-get (s3-publish-api-publish txt "test") :url))
+                     604800)))))))
+
+(ert-deftest s3-publish-test-no-lifetime-no-cap ()
+  "Without a lifetime, old objects get full-length links."
+  (test-s3-publish-with-fake-s3
+    (test-s3-publish-private
+      (test-s3-publish-with-file txt "a.txt" "a"
+        (let ((key (test-s3-publish--key txt)))
+          (s3-publish-api-publish txt "test")
+          (test-s3-publish--age-object key (* 30 86400))
+          (should (= (test-s3-publish--expires (s3-publish-sign-url "test" key "7d"))
+                     604800)))))))
+
+(ert-deftest s3-publish-test-live-edit-refreshes-images ()
+  "A live edit re-signs reused images, and re-uploads them on a lifetime."
+  (test-s3-publish-with-fake-s3
+    (test-s3-publish-with-lifetime "7d"
+      (test-s3-publish-with-file org "doc.org" "#+TITLE: D\n\n[[file:a.png]]\n"
+        (let* ((png (expand-file-name "a.png" (file-name-directory org)))
+               (image (test-s3-publish--key png))
+               (s3-publish-html-local-images 'upload))
+          (test-s3-publish--write-png png)
+          (s3-publish-api-publish org "test")
+          ;; Five days later, the page is edited live.
+          (test-s3-publish--age-object image (* 5 86400))
+          (test-s3-publish-editing buffer (test-s3-publish--key org ".html")
+            (test-s3-publish--edit-and-save "#+TITLE: D\n\nNew.\n\n[[file:a.png]]\n"))
+          (let ((html (test-s3-publish--object (test-s3-publish--key org ".html"))))
+            (should (string-match-p "New" html))
+            ;; The image has a link as long as the page's...
+            (should (string-match-p
+                     (regexp-quote (concat image "?Expires=+604800")) html)))
+          ;; ...because it was uploaded again, unchanged.
+          (should (< (float-time (time-subtract
+                                  nil (file-attribute-modification-time
+                                       (file-attributes
+                                        (expand-file-name (concat "objects/bkt/" image)
+                                                          test-s3-publish--root)))))
+                     60))
+          (should (equal (test-s3-publish--object image)
+                         (with-temp-buffer (insert-file-contents png) (buffer-string)))))))))
+
+(ert-deftest s3-publish-test-format-seconds ()
+  "Durations print briefly."
+  (should (equal (s3-publish--format-seconds 604800) "7d"))
+  (should (equal (s3-publish--format-seconds (+ (* 2 86400) (* 3 3600) 600)) "2d 3h 10m"))
+  (should (equal (s3-publish--format-seconds 3600) "1h"))
+  (should (equal (s3-publish--format-seconds 30) "1m")))
 
 (provide 'test-s3-publish-network)

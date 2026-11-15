@@ -774,6 +774,26 @@ buckets.)
 If you don't have adequate permission, you will see the error in the
 mini buffer.
 
+
+*** Telling s3-publish how long the bucket keeps objects
+
+A signed link that outlives its object would point at a deleted page,
+and its countdown would promise a time the page is already gone by. So
+tell s3-publish the bucket's lifetime, as the profile's =:lifetime=, and
+no link it signs is ever longer than the object has left:
+
+ * =M-x s3-publish-manage-profiles=, =Edit=, and answer the lifetime
+   question with e.g. =7d=.
+
+A fresh publish then gets at most the lifetime. A link signed later --
+=M-x s3-publish-sign-url=, =s=, =w= or =RET= in the list -- is cut to the
+lifetime less the object's age, read from the bucket; once an object's
+time is up, it gets no link at all, and republishing restarts its
+clock. A live edit, which reuses the page's published images, uploads
+them again unchanged, so they restart their clocks with the page.
+
+Lifecycle rules round up, and delete late, so objects outlive their
+links rather than the other way round.
 ** Mount S3 buckets as filesystems
 
 You can mount your S3 bucket as a local filesystem using s3fs:

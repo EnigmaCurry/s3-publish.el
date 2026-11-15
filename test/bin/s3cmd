@@ -45,6 +45,22 @@ case "$cmd" in
         rm -f "$(path_of "${positional[1]}")" "$(path_of "${positional[1]}").args"
         echo "delete: '${positional[1]}'"
         ;;
+    info)
+        # Like real s3cmd info, with the object's file time as its upload time.
+        src="$(path_of "${positional[1]}")"
+        if [ -f "$src" ]; then
+            echo "${positional[1]} (object):"
+            echo "   File size: $(stat -c %s "$src")"
+            echo "   Last mod:  $(date -u -r "$src" '+%a, %d %b %Y %H:%M:%S GMT')"
+            # As real s3cmd does with a key that may not read the bucket
+            # policy: the details, then a failure.
+            echo "ERROR: S3 error: 403 (AccessDenied): Access Denied." >&2
+            exit 77
+        else
+            echo "ERROR: S3 error: 404 (Not Found)" >&2
+            exit 12
+        fi
+        ;;
     ls)
         # Like `s3cmd ls --recursive s3://BUCKET': DATE TIME SIZE URI.
         b="${positional[1]#s3://}"; b="${b%%/*}"
