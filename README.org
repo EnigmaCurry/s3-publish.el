@@ -24,7 +24,10 @@ the URL, therefore the contents are only accessible to those whom you
 share it with.
 
 There is also an option to create an HTML index and RSS feed if you
-wish to make these URLs discoverable.
+wish to make these URLs discoverable. And when you want a URL you can
+read, or type, an Org or Markdown document can override the hash with
+a path of your own choosing, e.g. =notes/my-post= -- see [[#choosing-a-url][Choosing a
+document's URL]].
 
 Org and Markdown buffers get special treatment: they are exported to
 styled, self-contained HTML pages (via Org's HTML exporter, so both
@@ -577,6 +580,9 @@ Both of these create temporary files with random names in order to
 export them. Therefore these will always make new S3 keys.
 
 ** Choosing a document's URL
+:PROPERTIES:
+:CUSTOM_ID: choosing-a-url
+:END:
 
 A document is normally published under a key hashed from its path. To
 choose the name yourself, set it in the document -- in Org with a
