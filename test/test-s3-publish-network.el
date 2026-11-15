@@ -1131,7 +1131,10 @@ Kills the buffer afterwards, discarding changes."
         (test-s3-publish-editing buffer url
           (test-s3-publish--edit-and-save "two")
           (should (equal (test-s3-publish--object (test-s3-publish--key txt)) "two"))
-          (should (= 1 (test-s3-publish--count "<item>" (test-s3-publish--object "index.xml")))))))))
+          ;; One entry for this file, and the Markdown one still there.
+          (let ((feed (test-s3-publish--object "index.xml")))
+            (should (= 1 (test-s3-publish--count (regexp-quote (concat "<link>" url "</link>")) feed)))
+            (should (= 2 (test-s3-publish--count "<item>" feed)))))))))
 
 (ert-deftest s3-publish-test-edit-refuses-pages-without-source ()
   "A page with no source in the bucket, like the index, cannot be edited."
@@ -1166,5 +1169,60 @@ Kills the buffer afterwards, discarding changes."
                                         :key)
                              (test-s3-publish--key org)))
             (kill-buffer buffer)))))))
+
+;;; Feed and index integrity
+
+(ert-deftest s3-publish-test-republish-keeps-other-feed-entries ()
+  "Republishing one file replaces its entry and no other.
+This used to wipe every feed item from the first one up to the
+republished one: a lazy regexp matched across item boundaries."
+  (test-s3-publish-with-fake-s3
+    (test-s3-publish-with-file a "a.txt" "a"
+      (test-s3-publish-with-file b "b.txt" "b"
+        (test-s3-publish-with-file c "c.txt" "c"
+          (dolist (file (list a b c))
+            (s3-publish-api-publish file "test" (file-name-base file)))
+          (cl-flet ((check ()
+                      (let ((feed (test-s3-publish--object "index.xml"))
+                            (index (test-s3-publish--object "index.html")))
+                        (should (= 3 (test-s3-publish--count "<item>" feed)))
+                        (should (= 3 (test-s3-publish--count "<div class=\"entry\">" index)))
+                        (dolist (file (list a b c))
+                          (let ((url (concat "https://bkt.fake-endpoint/"
+                                             (test-s3-publish--key file))))
+                            (should (= 1 (test-s3-publish--count
+                                          (regexp-quote (concat "<link>" url "</link>"))
+                                          feed)))
+                            (should (= 1 (test-s3-publish--count
+                                          (regexp-quote (concat "<h2><a href=\"" url "\""))
+                                          index))))))))
+            (check)
+            ;; The newest, last in the feed and first in the index.
+            (s3-publish-api-publish c "test" "c again")
+            (check)
+            (should (string-match-p "<title>c again</title>"
+                                    (test-s3-publish--object "index.xml")))
+            ;; The oldest, first in the feed and last in the index.
+            (s3-publish-api-publish a "test" "a again")
+            (check)
+            ;; And one in the middle of both.
+            (s3-publish-api-publish b "test" "b again")
+            (check)
+            (should (string-match-p ">b again</a>" (test-s3-publish--object "index.html")))))))))
+
+(ert-deftest s3-publish-test-feed-item-bounds-stay-in-one-item ()
+  "The item found for a URL is that item alone, even when it is last."
+  (with-temp-buffer
+    (insert "<rss><channel>\n"
+            "<item><title>A</title><link>https://h/a</link></item>\n"
+            "<item><title>B</title><link>https://h/b</link></item>\n"
+            "<item><title>C</title><link>https://h/c</link></item>\n"
+            "</channel></rss>")
+    (let ((bounds (s3-publish--feed-item-bounds "https://h/c")))
+      (should (equal (buffer-substring (nth 0 bounds) (nth 1 bounds))
+                     "<item><title>C</title><link>https://h/c</link></item>")))
+    (should-not (s3-publish--feed-item-bounds "https://h/z"))
+    ;; A URL that merely starts another's is not a match.
+    (should-not (s3-publish--feed-item-bounds "https://h/"))))
 
 (provide 'test-s3-publish-network)

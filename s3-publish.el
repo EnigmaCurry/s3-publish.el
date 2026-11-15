@@ -4021,39 +4021,64 @@ If the index already contains an entry with the same URL, updates it instead."
                          file-url)))))
     (buffer-string)))
 
-;; Improve the feed search function to better handle XML
+(defun s3-publish--feed-item-bounds (url)
+  "Return (BEG END) of the RSS item in the current buffer linking URL.
+Each <item> is searched on its own, so a match never spans two items.
+Nil when there is no such item."
+  (save-excursion
+    (goto-char (point-min))
+    (let ((link (format "<link>[ \t\n]*%s[ \t\n]*</link>" (regexp-quote url)))
+          (case-fold-search t)
+          (found nil))
+      (while (and (not found) (search-forward "<item>" nil t))
+        (let ((beg (match-beginning 0))
+              (end (and (search-forward "</item>" nil t) (point))))
+          (unless end
+            (goto-char (point-max)))
+          (when (and end
+                     (save-excursion
+                       (goto-char beg)
+                       (re-search-forward link end t)))
+            (setq found (list beg end)))))
+      found)))
+
+(defun s3-publish--index-entry-bounds (url)
+  "Return (BEG END) of the HTML index entry in the current buffer for URL.
+Each entry is searched on its own, so a match never spans two entries.
+Nil when there is no such entry."
+  (save-excursion
+    (goto-char (point-min))
+    (let ((start-re "<div class=\"entry\">")
+          (href (format "href=\"%s\"" (regexp-quote url)))
+          (found nil))
+      (while (and (not found) (re-search-forward start-re nil t))
+        (let* ((beg (match-beginning 0))
+               (limit (save-excursion
+                        (if (re-search-forward start-re nil t)
+                            (match-beginning 0)
+                          (point-max))))
+               (end (save-excursion
+                      (if (re-search-forward
+                           "<div class=\"link\">[^\n]*</div>[ \t\n]*</div>" limit t)
+                          (point)
+                        limit))))
+          (when (save-excursion (goto-char beg) (re-search-forward href end t))
+            (setq found (list beg end)))))
+      found)))
+
 (defun s3-publish-feed-contains-url-p (feed url)
   "Check if FEED already contains an item with the given URL.
-Returns the match data if found, nil otherwise."
+Returns match data covering just that item if found, nil otherwise."
   (with-temp-buffer
     (insert feed)
-    (goto-char (point-min))
-    (let ((case-fold-search t)
-          (url-pattern (regexp-quote url)))
-      ;; We need a more precise regex that accounts for variations in XML
-      (when (re-search-forward
-             (format
-              "<item>\\(\\(.\\|\n\\)*?\\)<link>\\(\\(.\\|\n\\)*?\\)%s\\(\\(.\\|\n\\)*?\\)</link>\\(\\(.\\|\n\\)*?\\)</item>" 
-              url-pattern)
-             nil t)
-        (match-data)))))
+    (s3-publish--feed-item-bounds url)))
 
-;; Improve the HTML index search function
 (defun s3-publish-html-index-contains-url-p (html url)
   "Check if HTML index already contains an entry with the given URL.
-Returns the match data if found, nil otherwise."
+Returns match data covering just that entry if found, nil otherwise."
   (with-temp-buffer
     (insert html)
-    (goto-char (point-min))
-    (let ((case-fold-search t)
-          (url-pattern (regexp-quote url)))
-      ;; We need a more precise regex that accounts for variations in HTML
-      (when (re-search-forward
-             (format
-              "<div class=\"entry\">\\(\\(.\\|\n\\)*?\\)<a href=\"\\(\\(.\\|\n\\)*?\\)%s\\(\\(.\\|\n\\)*?\\)\"\\(\\(.\\|\n\\)*?\\)</div>\\s-*</div>"
-              url-pattern)
-             nil t)
-        (match-data)))))
+    (s3-publish--index-entry-bounds url)))
 
 ;; Rewrite the update feed function to directly modify the files
 (defun s3-publish-update-feed (profile file-url title description)
@@ -4109,18 +4134,13 @@ they will be updated rather than duplicated."
                (with-temp-buffer
                  (insert current-feed)
                  (goto-char (point-min))
-                 (let ((url-pattern (regexp-quote file-url))
-                       (found nil))
-                   ;; Look for any item with this URL
-                   (goto-char (point-min))
-                   (if (re-search-forward
-                        (format "<item>\\(\\(.\\|\n\\)*?\\)<link>\\(\\(.\\|\n\\)*?\\)%s\\(\\(.\\|\n\\)*?\\)</link>\\(\\(.\\|\n\\)*?\\)</item>"
-                                url-pattern)
-                        nil t)
-                       ;; If found, replace the item
+                 (let ((bounds (s3-publish--feed-item-bounds file-url)))
+                   (if bounds
+                       ;; If found, replace that item, and only that item.
                        (progn
-                         (setq found t)
-                         (replace-match new-feed-item t t))
+                         (delete-region (nth 0 bounds) (nth 1 bounds))
+                         (goto-char (nth 0 bounds))
+                         (insert (string-trim-left new-feed-item)))
                      ;; If not found, add it before closing channel tag
                      (goto-char (point-min))
                      (when (re-search-forward "</channel>" nil t)
@@ -4150,18 +4170,13 @@ they will be updated rather than duplicated."
                (with-temp-buffer
                  (insert current-index)
                  (goto-char (point-min))
-                 (let ((url-pattern (regexp-quote file-url))
-                       (found nil))
-                   ;; Look for any entry with this URL
-                   (goto-char (point-min))
-                   (if (re-search-forward
-                        (format "<div class=\"entry\">\\(\\(.\\|\n\\)*?\\)<a href=\"\\(\\(.\\|\n\\)*?\\)%s\\(\\(.\\|\n\\)*?\\)\"\\(\\(.\\|\n\\)*?\\)</div>\\s-*</div>"
-                                url-pattern)
-                        nil t)
-                       ;; If found, replace the entry
+                 (let ((bounds (s3-publish--index-entry-bounds file-url)))
+                   (if bounds
+                       ;; If found, replace that entry, and only that entry.
                        (progn
-                         (setq found t)
-                         (replace-match new-html-item t t))
+                         (delete-region (nth 0 bounds) (nth 1 bounds))
+                         (goto-char (nth 0 bounds))
+                         (insert (string-trim-left new-html-item)))
                      ;; If not found, add it to the entries div
                      (goto-char (point-min))
                      (when (re-search-forward "<div class=\"entries\">" nil t)
