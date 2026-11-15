@@ -599,9 +599,9 @@ an error, since saving must not prompt."
                         (s3-publish-upload-file b profile "B" "second"))))
           (test-s3-publish-with-list
             (should (equal (mapcar #'car tabulated-list-entries)
-                           (list url-b url-a)))
+                           (list (test-s3-publish--key b) (test-s3-publish--key a))))
             (goto-char (point-min))
-            (should (equal (tabulated-list-get-id) url-b))
+            (should (equal (tabulated-list-get-id) (test-s3-publish--key b)))
             (s3-publish-list-copy-url)
             (should (equal (car kill-ring) url-b))))))))
 
@@ -622,12 +622,90 @@ an error, since saving must not prompt."
       (should-not (test-s3-publish--object (test-s3-publish--key file)))
       (should-not (string-match-p "<item>" (test-s3-publish--object "index.xml"))))))
 
-(ert-deftest s3-publish-test-list-needs-a-feed ()
-  "Listing a profile without an RSS feed is refused."
+(ert-deftest s3-publish-test-list-without-a-feed-lists-the-bucket ()
+  "A profile without an RSS feed is listed from the bucket itself."
+  (test-s3-publish-with-fake-s3
+    (let ((s3-publish-profiles
+           (list (plist-put (plist-put (copy-sequence test-s3-publish--profile)
+                                       :rss-feed nil)
+                            :public-acl nil))))
+      (test-s3-publish-with-file file "a.txt" "hello"
+        (s3-publish-upload-file file (s3-publish-get-credentials
+                                      (car s3-publish-profiles)))
+        (test-s3-publish-with-list
+          (should (eq s3-publish-list--source 'bucket))
+          (should (equal (mapcar #'car tabulated-list-entries)
+                         (list (test-s3-publish--key file))))
+          (should (equal (aref (cadr (car tabulated-list-entries)) 1) "5"))
+          ;; Private: copying gives the s3:// URI, opening a signed URL.
+          (goto-char (point-min))
+          (s3-publish-list-copy-url)
+          (should (equal (car kill-ring)
+                         (concat "s3://bkt/" (test-s3-publish--key file))))
+          (let (opened)
+            (cl-letf (((symbol-function 'browse-url)
+                       (lambda (url &rest _) (setq opened url))))
+              (s3-publish-list-browse))
+            (should (string-match-p "\\`https://.*Expires=\\+3600" opened)))
+          ;; There is no feed to switch to.
+          (should-error (s3-publish-list-toggle-source) :type 'user-error))))))
+
+(ert-deftest s3-publish-test-list-bucket-with-prefix-and-toggle ()
+  "A prefix argument lists the whole bucket; `t' switches back to the feed."
+  (test-s3-publish-with-fake-s3
+    (test-s3-publish-with-file file "a.txt" "a"
+      (s3-publish-upload-file file (s3-publish-get-credentials
+                                    test-s3-publish--profile))
+      (let ((display-buffer-overriding-action '(display-buffer-no-window
+                                                (allow-no-window . t))))
+        (save-window-excursion
+          (s3-publish-list "test" t)
+          (with-current-buffer "*s3-publish: test*"
+            (unwind-protect
+                (progn
+                  (should (eq s3-publish-list--source 'bucket))
+                  ;; The bucket holds the feed and index too.
+                  (should (equal (sort (mapcar #'car tabulated-list-entries) #'string<)
+                                 (sort (list (test-s3-publish--key file)
+                                             "index.html" "index.xml")
+                                       #'string<)))
+                  (s3-publish-list-toggle-source)
+                  (should (eq s3-publish-list--source 'feed))
+                  (should (equal (mapcar #'car tabulated-list-entries)
+                                 (list (test-s3-publish--key file)))))
+              (kill-buffer))))))))
+
+(ert-deftest s3-publish-test-list-bucket-delete-takes-document-source ()
+  "Deleting a page from the bucket list deletes its source beside it."
   (test-s3-publish-with-fake-s3
     (let ((s3-publish-profiles
            (list (plist-put (copy-sequence test-s3-publish--profile)
                             :rss-feed nil))))
-      (should-error (s3-publish-list "test") :type 'user-error))))
+      (test-s3-publish-with-file file "doc.org" "#+TITLE: Doc\n"
+        (with-current-buffer (find-file-noselect file)
+          (unwind-protect (s3-publish-org-buffer)
+            (kill-buffer)))
+        (test-s3-publish-with-list
+          (goto-char (point-min))
+          (while (not (equal (tabulated-list-get-id)
+                             (test-s3-publish--key file ".html")))
+            (forward-line 1))
+          (cl-letf (((symbol-function 'yes-or-no-p) (lambda (&rest _) t)))
+            (s3-publish-list-delete))
+          (should-not tabulated-list-entries))))))
+
+(ert-deftest s3-publish-test-bucket-objects-parse-s3cmd-ls ()
+  "The bucket listing reads s3cmd's own `ls' format."
+  (cl-letf (((symbol-function 's3-publish--s3cmd-or-error)
+             (lambda (&rest _)
+               (concat "2026-11-14 22:00          1234  s3://bkt/a b.html\n"
+                       "2026-11-13 09:05             0  s3://bkt/dir/x.png\n"
+                       "                          DIR  s3://bkt/dir/\n"))))
+    (let ((objects (s3-publish--bucket-objects test-s3-publish--profile)))
+      (should (equal (mapcar (lambda (o) (plist-get o :key)) objects)
+                     '("a b.html" "dir/x.png")))
+      (should (equal (plist-get (car objects) :size) 1234))
+      (should (equal (format-time-string "%F %H:%M" (plist-get (car objects) :date))
+                     "2026-11-14 22:00")))))
 
 (provide 'test-s3-publish-network)

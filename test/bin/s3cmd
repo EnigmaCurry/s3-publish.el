@@ -45,6 +45,17 @@ case "$cmd" in
         rm -f "$(path_of "${positional[1]}")" "$(path_of "${positional[1]}").args"
         echo "delete: '${positional[1]}'"
         ;;
+    ls)
+        # Like `s3cmd ls --recursive s3://BUCKET': DATE TIME SIZE URI.
+        b="${positional[1]#s3://}"; b="${b%%/*}"
+        dir="$root/objects/$b"
+        [ -d "$dir" ] || exit 0
+        (cd "$dir" && find . -type f ! -name '*.args' | sed 's|^\./||' | sort) |
+            while read -r key; do
+                printf '%s %10s   s3://%s/%s\n' "$(date -r "$dir/$key" '+%Y-%m-%d %H:%M')" \
+                       "$(stat -c %s "$dir/$key")" "$b" "$key"
+            done
+        ;;
     signurl)
         u="${positional[1]#s3://}"
         echo "https://${u%%/*}.fake-endpoint/${u#*/}?Expires=${positional[2]}&Signature=fake"

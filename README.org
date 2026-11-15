@@ -637,8 +637,11 @@ send no header at all.
 ** Listing published files
 
 =M-x s3-publish-list= shows everything published with a profile, newest
-first, read from its RSS feed (so the profile needs the feed turned
-on). On a line:
+first. A profile that keeps an RSS feed is listed from the feed, with
+the titles things were published under. Any other profile -- or any
+profile, with a prefix argument (=C-u M-x s3-publish-list=) -- is
+listed from the bucket itself (=s3cmd ls=): every object in it, with
+its size, including the feed, the index and uploaded images. On a line:
 
 | Key   | Action                                                    |
 |-------+-----------------------------------------------------------|
@@ -646,9 +649,12 @@ on). On a line:
 | =w=   | Copy its URL                                              |
 | =s=   | Copy a signed URL that expires                            |
 | =D=   | Delete it from the bucket, the feed and the index         |
+| =t=   | Switch between the feed and the whole bucket              |
 | =g=   | Fetch the list again                                      |
 
 Deleting a document deletes its source file along with its HTML page.
+A file in a private bucket opens through a signed URL that works for an
+hour.
 
 ** Removing URLs
 
