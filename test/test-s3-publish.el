@@ -104,6 +104,16 @@ otherwise renders the title again and lists it twice in the contents."
     (should (equal (test-s3-publish--org md) "* Section"))))
 
 
+(ert-deftest s3-publish-test-frontmatter-title-repeated-by-h1-is-dropped ()
+  "A body opening with the front matter's title does not repeat it."
+  (let ((md "---\ntitle: Real Title\n---\n\n# Real Title\n\nText.\n\n## Part\n"))
+    (should (equal (test-s3-publish--keyword md "TITLE") "Real Title"))
+    ;; The repeat is gone, and the headings under it move up a level.
+    (should (equal (test-s3-publish--org md) "Text.\n\n* Part")))
+  ;; Only an exact repeat goes; another heading is a section, as before.
+  (let ((md "---\ntitle: Real Title\n---\n\n# Real Titles\n"))
+    (should (equal (test-s3-publish--org md) "* Real Titles"))))
+
 ;;; Inline markup
 
 (ert-deftest s3-publish-test-emphasis ()

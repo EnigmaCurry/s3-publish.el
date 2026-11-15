@@ -287,7 +287,7 @@ headings shift up a level to take its place. If one remains, levels are
 left alone, so nothing is dropped or flattened onto its own children.
 
 A later level-1 heading repeating the title exactly is dropped, keeping
-its body. Generated Markdown often restates its own title partway down;
+its body. So is a body that opens by repeating a front matter title. Generated Markdown often restates its own title partway down;
 left in, it renders the title a second time and lists it twice in the
 table of contents.
 

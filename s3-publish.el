@@ -3342,9 +3342,15 @@ as ordinary text rather than converted."
          (lines (s3-publish--md-normalize-setext (nth 0 frontmatter)))
          (description (nth 2 frontmatter))
          ;; A title in the front matter wins, and leaves the body's headings
-         ;; alone; otherwise a level-1 heading may be promoted out of it.
+         ;; alone -- unless the body opens by repeating it, which would
+         ;; render the title twice: that heading goes, as when promoted.
+         ;; Otherwise a level-1 heading may be promoted out of the body.
          (promoted (if (nth 1 frontmatter)
-                       (cons nil lines)
+                       (let ((candidate (s3-publish--md-promote-title lines)))
+                         (if (equal (and (car candidate) (string-trim (car candidate)))
+                                    (string-trim (nth 1 frontmatter)))
+                             candidate
+                           (cons nil lines)))
                      (s3-publish--md-promote-title lines)))
          (title (or (nth 1 frontmatter) (car promoted)))
          (body (cdr promoted))
