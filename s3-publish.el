@@ -858,59 +858,12 @@ span.underline {
 	background-color: #8e24aa
 }
 
-pre.src:before {
-    margin-right: 0.5em;
-}
-
 .org-ul li {
 	padding-top: 0.5em;
 }
 
 details {
 	margin: 2em;
-}
-
-.code-block-container {
-	border-radius: 5px;
-	overflow: visible;
-	margin-bottom: 1em;
-	box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-    max-width: 80em;
-}
-
-.code-block-header {
-	background: #0d0d0d;
-    border-bottom: 2px solid #573b3b;
-	padding: 0.1em 1em 0.2em 0.5em;
-	font-family: sans-serif;
-	font-weight: bold;
-	font-size: 0.9em;
-    max-width: 80em;
-}
-
-.code-block-header.shell {
-    color: #27d75b;
-}
-
-.code-block-header.lang {
-    color: #606c71;
-}
-
-.code-block-container pre {
-	margin: 0;
-}
-
-span.filename {
-    font-family: monospace;
-    font-size: 2em;
-    margin-left: 0.5em;
-}
-
-span.org-parameter {
-    background-color: #202020;
-    padding: 0 0.5em;
-    border-radius: 5px;
-    font-size: 1.1em;
 }
 
 /* Fixed: this rule used to nest `h1.title' inside `div#content' and leave the
@@ -957,6 +910,44 @@ h1, h2, h3, h4, h5, h6 { scroll-margin-top: 1em; }
    `pre.src-example' rule never matches any Org output. */
 pre.example {
 	background: #282928;
+}
+
+/* Source block language label.  s3-publish tags each `pre.src' with a
+   `data-lang' attribute, since CSS cannot read the language out of Org's
+   `src-LANG' class. */
+pre.src[data-lang]::before {
+	content: attr(data-lang);
+	display: block;
+	margin: -5pt -5pt 5pt -5pt;
+	padding: 0.1em 1em 0.2em 0.5em;
+	background: #0d0d0d;
+	border-bottom: 2px solid #573b3b;
+	color: #606c71;
+	font-family: sans-serif;
+	font-weight: bold;
+	font-size: 0.9em;
+}
+
+/* The copy button `s3-publish-html-copy-button' adds to each code block.
+   Its script positions it at the top right, over the language label. */
+button.s3-publish-copy {
+	padding: 0 0.6em;
+	line-height: 1.2;
+	border: 1px solid #555;
+	border-radius: 4px;
+	background: #181f29;
+	color: #e0e0e0;
+	font-family: sans-serif;
+	font-size: 0.7em;
+	font-weight: bold;
+	opacity: 0.6;
+}
+.s3-publish-code:hover button.s3-publish-copy,
+button.s3-publish-copy:focus-visible {
+	opacity: 1;
+}
+button.s3-publish-copy:hover {
+	border-color: #ff5370;
 }
 
 /* Images out of Markdown carry no size constraint, so cap them. */
@@ -1229,6 +1220,123 @@ ordinary links."
   :type 'boolean
   :group 's3-publish)
 
+(defcustom s3-publish-html-copy-button t
+  "When non-nil, every code block in published HTML has a copy button.
+
+The button copies the block's contents to the clipboard, leaving out any
+line numbers.  It is added by a small inline script, through
+`org-html-scripts' rather than the page head, so it is independent of
+`s3-publish-html-theme' and survives a document's own `#+HTML_HEAD:'.
+A document can still opt out with `#+OPTIONS: html-scripts:nil'.
+
+The script positions the button; its colours come from the theme.
+`s3-publish-html-default-style' styles it, and a custom theme can style
+`button.s3-publish-copy' to match."
+  :type 'boolean
+  :group 's3-publish)
+
+(defconst s3-publish-html-copy-button-script "\
+<style>
+.s3-publish-code { position: relative; }
+.s3-publish-copy { position: absolute; top: 0.15em; right: 0.2em; cursor: pointer; }
+</style>
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+  function fallbackCopy(text) {
+    var area = document.createElement('textarea');
+    area.value = text;
+    area.setAttribute('readonly', '');
+    area.style.position = 'fixed';
+    area.style.opacity = '0';
+    document.body.appendChild(area);
+    area.select();
+    var ok = document.execCommand('copy');
+    document.body.removeChild(area);
+    return ok ? Promise.resolve() : Promise.reject();
+  }
+  function copy(text) {
+    if (navigator.clipboard && window.isSecureContext) {
+      return navigator.clipboard.writeText(text).catch(function () {
+        return fallbackCopy(text);
+      });
+    }
+    try { return fallbackCopy(text); } catch (e) { return Promise.reject(e); }
+  }
+  function blockText(pre) {
+    var clone = pre.cloneNode(true);
+    clone.querySelectorAll('.linenr').forEach(function (n) { n.remove(); });
+    // Org ends every block with a newline; pasted into a shell, it would run.
+    return clone.textContent.replace(/\\n$/, '');
+  }
+  document.querySelectorAll('pre.src, pre.example').forEach(function (pre) {
+    var wrap = document.createElement('div');
+    wrap.className = 's3-publish-code';
+    pre.parentNode.insertBefore(wrap, pre);
+    wrap.appendChild(pre);
+    var button = document.createElement('button');
+    button.type = 'button';
+    button.className = 's3-publish-copy';
+    button.textContent = 'Copy';
+    button.setAttribute('aria-label', 'Copy code to clipboard');
+    var timer;
+    button.addEventListener('click', function () {
+      copy(blockText(pre)).then(function () {
+        button.textContent = 'Copied';
+      }, function () {
+        button.textContent = 'Failed';
+      }).then(function () {
+        clearTimeout(timer);
+        timer = setTimeout(function () { button.textContent = 'Copy'; }, 1500);
+      });
+    });
+    wrap.appendChild(button);
+  });
+});
+</script>
+"
+  "Markup that adds `s3-publish-html-copy-button' to each code block.")
+
+(defcustom s3-publish-html-ignore-advice '(org-html-src-block)
+  "Org HTML export functions whose advice is ignored while publishing.
+
+Advice on Org's exporter, typically added in a personal config to decorate
+local exports, otherwise leaks into every published page.  Each function
+listed here is exported with its original, unadvised definition; the advice
+itself stays in place and applies again as soon as the export finishes.
+
+The default covers source blocks, the usual target of such advice, so the
+theme's own code block styling is what readers see.  Set this to nil to
+publish with your advice applied."
+  :type '(repeat function)
+  :group 's3-publish)
+
+(defun s3-publish--call-without-advice (functions fn)
+  "Call FN with each of FUNCTIONS temporarily stripped of its advice."
+  (if (null functions)
+      (funcall fn)
+    (let* ((symbol (car functions))
+           (advised (and (fboundp symbol) (symbol-function symbol)))
+           ;; `advice-add' replaces the definition with a wrapper holding the
+           ;; original; `advice--cd*r' unwraps every layer of it.
+           (original (and advised (fboundp 'advice--cd*r)
+                          (advice--cd*r advised))))
+      (if (or (null original) (eq original advised))
+          (s3-publish--call-without-advice (cdr functions) fn)
+        (cl-letf (((symbol-function symbol) original))
+          (s3-publish--call-without-advice (cdr functions) fn))))))
+
+(defun s3-publish--html-src-block-language (text backend _info)
+  "Tag the exported source block TEXT with its language, for the theme.
+
+Org only names the language in a class, `src-LANG', which CSS cannot
+print.  A `data-lang' attribute can be, via `attr()'.  Applies to the HTML
+BACKEND and anything derived from it."
+  (if (and (org-export-derived-backend-p backend 'html)
+           (string-match "<pre class=\"src src-\\([^\" ]+\\)\"" text))
+      (replace-match (format "\\& data-lang=\"%s\"" (match-string 1 text))
+                     t nil text)
+    text))
+
 (defun s3-publish--call-with-html-export-settings (fn)
   "Call FN with no arguments, with Org's HTML exporter configured.
 
@@ -1273,8 +1381,25 @@ off leaves your own Org export settings untouched."
           ;; `s3-publish-markdown-to-org' -- which keeps anchors both stable
           ;; across publishes and readable in a URL.
           (org-html-prefer-user-labels
-           (if s3-publish-html-self-link-headlines t org-html-prefer-user-labels)))
-      (funcall fn))))
+           (if s3-publish-html-self-link-headlines t org-html-prefer-user-labels))
+          ;; Lets the theme label each source block with its language.
+          (org-export-filter-src-block-functions
+           (if css
+               (append org-export-filter-src-block-functions
+                       '(s3-publish--html-src-block-language))
+             org-export-filter-src-block-functions))
+          ;; Org's own script slot, which a document's `#+HTML_HEAD:' does
+          ;; not replace.  Whatever scripts the user already includes stay.
+          (org-html-scripts
+           (if s3-publish-html-copy-button
+               (concat (if org-html-head-include-scripts
+                           (org-element-normalize-string org-html-scripts)
+                         "")
+                       s3-publish-html-copy-button-script)
+             org-html-scripts))
+          (org-html-head-include-scripts
+           (if s3-publish-html-copy-button t org-html-head-include-scripts)))
+      (s3-publish--call-without-advice s3-publish-html-ignore-advice fn))))
 
 
 
@@ -1862,6 +1987,71 @@ level 1 are dropped, which is how a promoted title is removed from the body."
       (push (if (string= lang "") "#+end_example" "#+end_src") out))
     (nreverse out)))
 
+(defun s3-publish--md-heading-text (line)
+  "Return the text of ATX heading LINE, or nil if LINE is not one."
+  (when (string-match "^#\\{1,6\\}[ \t]+\\(.*?\\)[ \t]*#*[ \t]*$" line)
+    (match-string 1 line)))
+
+(defun s3-publish--md-promote-title (lines)
+  "Promote a level-1 heading in LINES to the document title.
+
+Returns a cons (TITLE . REMAINING-LINES).  TITLE is nil when no heading
+qualifies, in which case LINES comes back unchanged.
+
+A level-1 heading becomes the title when it is the document's first
+content -- the conventional shape for Markdown, and what almost all
+generated Markdown looks like -- or when it is the only one in the
+document.
+
+Any later level-1 heading repeating that exact text is dropped too.  A
+heading identical to the title renders the title a second time and shows
+up again in the contents, which is noise rather than structure; its body
+is kept."
+  (let ((index 0)
+        (in-fence nil)
+        (token nil)
+        (first-content nil)
+        (h1-indices '()))
+    (dolist (line lines)
+      (cond
+       (in-fence
+        (when (s3-publish--md-fence-close-p line token)
+          (setq in-fence nil token nil)))
+       ((s3-publish--md-fence line)
+        (setq token (car (s3-publish--md-fence line)) in-fence t))
+       (t
+        (when (and (null first-content)
+                   (not (string-match-p "^[ \t]*$" line)))
+          (setq first-content index))
+        (when (eq (s3-publish--md-atx-level line) 1)
+          (push index h1-indices))))
+      (setq index (1+ index)))
+    (setq h1-indices (nreverse h1-indices))
+    (let ((first-h1 (car h1-indices)))
+      (if (not (and first-h1
+                    (or (eql first-h1 first-content)
+                        (= (length h1-indices) 1))))
+          (cons nil lines)
+        (let ((title (s3-publish--md-heading-text (nth first-h1 lines)))
+              (keep '())
+              (i 0)
+              (drop-blank nil))
+          (dolist (line lines)
+            (cond
+             ((or (eql i first-h1)
+                  (and (memq i h1-indices)
+                       (equal (s3-publish--md-heading-text line) title)))
+              ;; Take the blank line that followed the heading with it, so
+              ;; removing it does not leave a gap in the text.
+              (setq drop-blank t))
+             ((and drop-blank (string-match-p "^[ \t]*$" line))
+              (setq drop-blank nil))
+             (t
+              (setq drop-blank nil)
+              (push line keep)))
+            (setq i (1+ i)))
+          (cons title (nreverse keep)))))))
+
 (defun s3-publish-markdown-to-org (markdown)
   "Convert MARKDOWN text to Org markup and return it as a string.
 
@@ -1884,25 +2074,21 @@ as ordinary text rather than converted."
                     (butlast lines)
                   lines))
          (frontmatter (s3-publish--md-strip-frontmatter lines))
-         (body (s3-publish--md-normalize-setext (nth 0 frontmatter)))
-         (title (nth 1 frontmatter))
+         (lines (s3-publish--md-normalize-setext (nth 0 frontmatter)))
          (description (nth 2 frontmatter))
-         (promote (and (null title) (= (s3-publish--md-count-h1 body) 1)))
-         (shift 0))
-    (when promote
-      (setq shift 1)
-      (catch 'found
-        (let ((in-fence nil) (token nil))
-          (dolist (line body)
-            (cond
-             (in-fence
-              (when (s3-publish--md-fence-close-p line token)
-                (setq in-fence nil token nil)))
-             ((s3-publish--md-fence line)
-              (setq token (car (s3-publish--md-fence line)) in-fence t))
-             ((eq (s3-publish--md-atx-level line) 1)
-              (string-match "^#[ \t]+\\(.*?\\)[ \t]*#*[ \t]*$" line)
-              (throw 'found (setq title (match-string 1 line)))))))))
+         ;; A title in the front matter wins, and leaves the body's headings
+         ;; alone; otherwise a level-1 heading may be promoted out of it.
+         (promoted (if (nth 1 frontmatter)
+                       (cons nil lines)
+                     (s3-publish--md-promote-title lines)))
+         (title (or (nth 1 frontmatter) (car promoted)))
+         (body (cdr promoted))
+         ;; Shift the remaining headings up only when the promotion left no
+         ;; level-1 heading behind.  Shifting with one still present would
+         ;; drop it, or flatten it against its own children.
+         (shift (if (and (car promoted) (= (s3-publish--md-count-h1 body) 0))
+                    1
+                  0)))
     (concat
      (if title
          (format "#+TITLE: %s\n" (s3-publish--md-inline-to-org title))

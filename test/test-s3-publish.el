@@ -29,11 +29,43 @@ drawers keeps these tests about the markup itself."
     (should (equal (test-s3-publish--keyword md "TITLE") "My Document"))
     (should (equal (test-s3-publish--org md) "* Section\n\n** Detail"))))
 
-(ert-deftest s3-publish-test-multiple-h1-not-promoted ()
-  "With more than one H1 nothing is promoted and levels are preserved."
-  (let ((md "# One\n\n# Two\n"))
+(ert-deftest s3-publish-test-leading-h1-is-the-title ()
+  "A level-1 heading opening the document is its title, even alongside others.
+Requiring it to be the only one left real documents with no title at all."
+  (let ((md "# One\n\nprose\n\n# Two\n\n## Under Two\n"))
+    (should (equal (test-s3-publish--keyword md "TITLE") "One"))
+    ;; A level-1 heading remains, so levels are left alone rather than
+    ;; shifted: shifting would drop "Two" or flatten it onto its child.
+    (should (equal (test-s3-publish--org md) "prose\n\n* Two\n\n** Under Two"))))
+
+(ert-deftest s3-publish-test-h1-after-prose-still-promoted-when-alone ()
+  "A lone level-1 heading is the title wherever it sits."
+  (let ((md "intro\n\n# Only One\n\n## Sub\n"))
+    (should (equal (test-s3-publish--keyword md "TITLE") "Only One"))
+    (should (equal (test-s3-publish--org md) "intro\n\n* Sub"))))
+
+(ert-deftest s3-publish-test-duplicate-title-heading-is-dropped ()
+  "A later level-1 heading repeating the title is dropped, keeping its body.
+Generated Markdown often restates its own title partway down, which
+otherwise renders the title again and lists it twice in the contents."
+  (let ((md "# My Title\n\nintro\n\n# My Title\n\n## Section\n\nbody\n"))
+    (should (equal (test-s3-publish--keyword md "TITLE") "My Title"))
+    ;; The repeat is gone, and with no level-1 heading left the sections
+    ;; shift up into its place.
+    (should (equal (test-s3-publish--org md) "intro\n\n* Section\n\nbody"))))
+
+(ert-deftest s3-publish-test-duplicate-title-not-dropped-when-different ()
+  "Only an exact repeat of the title is dropped; other headings stay."
+  (let ((md "# My Title\n\nintro\n\n# Other\n"))
+    (should (equal (test-s3-publish--keyword md "TITLE") "My Title"))
+    (should (equal (test-s3-publish--org md) "intro\n\n* Other"))))
+
+(ert-deftest s3-publish-test-no-h1-means-no-title ()
+  "A document that never uses a level-1 heading gets no title."
+  (let ((md "## Alpha\n\n## Beta\n"))
     (should-not (test-s3-publish--keyword md "TITLE"))
-    (should (equal (test-s3-publish--org md) "* One\n\n* Two"))))
+    (should (equal (test-s3-publish--org md) "** Alpha\n\n** Beta"))))
+
 
 (ert-deftest s3-publish-test-closed-atx-heading ()
   "Trailing hashes on a closed ATX heading are stripped."
@@ -407,6 +439,87 @@ Org's generated ids are content hashes that change between exports."
       (cond ((eq (aref css i) ?{) (setq open (1+ open)))
             ((eq (aref css i) ?}) (setq close (1+ close)))))
     (should (= open close))))
+
+
+;;; Source blocks
+
+(defun test-s3-publish--advise-src-block (orig &rest args)
+  "Advice standing in for a personal config's source block decoration."
+  (concat "ADVISED-MARKER" (apply orig args)))
+
+(defun test-s3-publish--export-src-block ()
+  "Export a single bash source block and return the HTML."
+  (let* ((html-file (s3-publish--org-string-export-to-html
+                     "#+begin_src bash\necho hi\n#+end_src\n"))
+         (html (with-temp-buffer (insert-file-contents html-file) (buffer-string))))
+    (delete-file html-file)
+    html))
+
+(ert-deftest s3-publish-test-src-block-advice-ignored ()
+  "Advice on `org-html-src-block' does not leak into published pages."
+  (advice-add 'org-html-src-block :around #'test-s3-publish--advise-src-block)
+  (unwind-protect
+      (progn
+        (should-not (string-match-p "ADVISED-MARKER"
+                                    (test-s3-publish--export-src-block)))
+        ;; The advice is only suspended, not removed.
+        (should (advice-member-p #'test-s3-publish--advise-src-block
+                                 'org-html-src-block)))
+    (advice-remove 'org-html-src-block #'test-s3-publish--advise-src-block)))
+
+(ert-deftest s3-publish-test-src-block-advice-can-be-kept ()
+  "With `s3-publish-html-ignore-advice' nil, advice applies as usual."
+  (advice-add 'org-html-src-block :around #'test-s3-publish--advise-src-block)
+  (unwind-protect
+      (let ((s3-publish-html-ignore-advice nil))
+        (should (string-match-p "ADVISED-MARKER"
+                                (test-s3-publish--export-src-block))))
+    (advice-remove 'org-html-src-block #'test-s3-publish--advise-src-block)))
+
+(ert-deftest s3-publish-test-src-block-tagged-with-language ()
+  "Themed source blocks carry their language for the theme to label."
+  (should (string-match-p "<pre class=\"src src-bash\" data-lang=\"bash\">"
+                          (test-s3-publish--export-src-block)))
+  (should (string-match-p "attr(data-lang)" s3-publish-html-default-style)))
+
+(defconst test-s3-publish--copy-script "className = 's3-publish-copy'"
+  "Text found only in the copy button script, not in the theme CSS.")
+
+(ert-deftest s3-publish-test-copy-button-script-included ()
+  "Published pages carry the copy button script by default."
+  (should (string-match-p test-s3-publish--copy-script (test-s3-publish--export-src-block)))
+  (should (string-match-p "button\\.s3-publish-copy" s3-publish-html-default-style)))
+
+(ert-deftest s3-publish-test-copy-button-can-be-disabled ()
+  "With `s3-publish-html-copy-button' nil, no script is added."
+  (let ((s3-publish-html-copy-button nil))
+    (should-not (string-match-p test-s3-publish--copy-script
+                                (test-s3-publish--export-src-block)))))
+
+(ert-deftest s3-publish-test-copy-button-is-independent-of-the-theme ()
+  "The copy button survives the theme being off or overridden."
+  (let ((s3-publish-html-theme nil))
+    (should (string-match-p test-s3-publish--copy-script
+                            (test-s3-publish--export-src-block))))
+  (let* ((html-file (s3-publish--org-string-export-to-html
+                     "#+HTML_HEAD: <style>body { color: olive; }</style>\n* Section\n"))
+         (html (with-temp-buffer (insert-file-contents html-file) (buffer-string))))
+    (delete-file html-file)
+    (should (string-match-p test-s3-publish--copy-script html))))
+
+(ert-deftest s3-publish-test-copy-button-keeps-user-scripts ()
+  "Scripts the user already includes are kept alongside the copy button."
+  (let ((org-html-head-include-scripts t)
+        (org-html-scripts "<script>var userScript = 1;</script>"))
+    (let ((html (test-s3-publish--export-src-block)))
+      (should (string-match-p "userScript" html))
+      (should (string-match-p test-s3-publish--copy-script html)))))
+
+(ert-deftest s3-publish-test-src-block-untagged-without-theme ()
+  "With the theme off, source block markup is Org's own."
+  (let ((s3-publish-html-theme nil))
+    (should-not (string-match-p "data-lang"
+                                (test-s3-publish--export-src-block)))))
 
 
 ;;; Favicon

@@ -244,11 +244,20 @@ The built-in translator needs no external programs and understands:
  * Tables, blockquotes and thematic breaks
  * Backslash escapes
 
-A document containing exactly one level-1 heading and no front matter
-title has that heading promoted to =#+TITLE:=, with the remaining
-headings shifted up one level. This is the shape most Markdown takes
-(including most LLM output), and it means the published page gets a
-proper document title instead of a numbered first section.
+Unless the front matter supplies a title, a level-1 heading is promoted
+to =#+TITLE:= when it opens the document, or when it is the only one in
+it. This is how Markdown is conventionally written -- and how nearly all
+generated Markdown looks -- so the published page gets a proper document
+title instead of a numbered first section.
+
+If the promotion leaves no level-1 heading behind, the remaining
+headings shift up a level to take its place. If one remains, levels are
+left alone, so nothing is dropped or flattened onto its own children.
+
+A later level-1 heading repeating the title exactly is dropped, keeping
+its body. Generated Markdown often restates its own title partway down;
+left in, it renders the title a second time and lists it twice in the
+table of contents.
 
 Indented (four space) code blocks and raw inline HTML are passed
 through as ordinary text rather than converted. If you want full
@@ -307,6 +316,31 @@ to break when the page is viewed from a different origin. For the same
 reason, source blocks are exported with CSS classes rather than with
 the colours of your running Emacs theme baked in, so code is coloured
 by the page theme instead of fighting it.
+
+Each source block is labelled with its language by the theme. Advice
+your config places on =org-html-src-block=, such as a custom header
+for local exports, is ignored while publishing so it does not clash
+with that label; the advice itself is left in place. To publish with
+it applied, or to ignore advice on other exporter functions, set
+=s3-publish-html-ignore-advice=:
+
+#+begin_src emacs-lisp
+  ;; Default: source blocks are exported unadvised.
+  (setq s3-publish-html-ignore-advice '(org-html-src-block))
+  ;; Keep all of your advice.
+  (setq s3-publish-html-ignore-advice nil)
+#+end_src
+
+Every source and example block also gets a /Copy/ button that copies
+its contents, without line numbers, to the clipboard. It is a small
+inline script, so like the theme it needs nothing uploaded beside the
+page. It is independent of the theme and survives a document's own
+=#+HTML_HEAD:=; a single document can opt out with =#+OPTIONS:
+html-scripts:nil=, or you can turn it off everywhere:
+
+#+begin_src emacs-lisp
+  (setq s3-publish-html-copy-button nil)
+#+end_src
 
 Published pages also carry an icon, inlined as a =data:= URI for the same
 self-contained reason:
