@@ -794,6 +794,18 @@ them again unchanged, so they restart their clocks with the page.
 
 Lifecycle rules round up, and delete late, so objects outlive their
 links rather than the other way round.
+
+A page in such a bucket also says when it goes, in its footer, lined up
+under the date it was last published:
+
+#+begin_example
+  Last Modified:       2026-11-15 Sun 01:51
+  Will Self-Destruct:  2026-11-22 Sun 17:00
+#+end_example
+
+That is the moment the bucket's rule makes it due for deletion -- the
+lifetime from publishing, rounded up to midnight UTC -- and republishing
+pushes it back.
 ** Mount S3 buckets as filesystems
 
 You can mount your S3 bucket as a local filesystem using s3fs:

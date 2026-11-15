@@ -1644,4 +1644,39 @@ by, failing the publish."
         ;; Only whole days.
         (should-error (s3-publish-bucket-lifecycle "test" "7d") :type 'user-error)))))
 
+(ert-deftest s3-publish-test-self-destruct-footer ()
+  "A page in a bucket with a lifetime says when it will be deleted."
+  (test-s3-publish-with-fake-s3
+    (test-s3-publish-with-lifetime "7d"
+      (test-s3-publish-with-file org "doc.org" "#+TITLE: D\n\nHi.\n"
+        (s3-publish-api-publish org "test")
+        (let ((html (test-s3-publish--object (test-s3-publish--key org ".html"))))
+          ;; The two dates side by side in a two-column grid.
+          (should (string-match
+                   (concat "<div class=\"s3-publish-dates\" style=\"display: grid;[^>]*>\n"
+                           "<span>Last Modified:</span><span class=\"date\">[^<]+</span>\n"
+                           "<span>Will Self-Destruct:</span>"
+                           "<span class=\"self-destruct\">\\([^<]*\\)</span>")
+                   html))
+          (should-not (string-match-p "<p class=\"date\">" html))
+          (let* ((due (match-string 1 html))
+                 (expected (format-time-string
+                            org-html-metadata-timestamp-format
+                            (s3-publish--self-destruct-time "7d"))))
+            (should (equal due expected))))))
+    ;; Not without a lifetime.
+    (test-s3-publish-private
+      (test-s3-publish-with-file org "doc.org" "#+TITLE: D\n"
+        (s3-publish-api-publish org "test")
+        (should-not (string-match-p "Self-Destruct"
+                                    (test-s3-publish--object
+                                     (test-s3-publish--key org ".html"))))))))
+
+(ert-deftest s3-publish-test-self-destruct-time ()
+  "The deletion time is the lifetime from now, rounded up to midnight UTC."
+  (let* ((due (s3-publish--self-destruct-time "7d"))
+         (seconds (float-time due)))
+    (should (= 0 (mod seconds 86400)))
+    (should (<= (+ (float-time) 604800) seconds (+ (float-time) 604800 86400)))))
+
 (provide 'test-s3-publish-network)

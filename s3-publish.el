@@ -2331,6 +2331,7 @@ Returns the HTML URL, which is also copied to the kill ring."
           (insert footer))
          (t (goto-char (point-max)) (insert "\n" footer))))
       (write-region (point-min) (point-max) html-file nil 'quiet))
+    (s3-publish--add-self-destruct html-file profile)
     (let ((images (s3-publish--localize-images
                    html-file (file-name-directory source-file) profile)))
       (setq s3-publish--uploaded-images (mapcar #'cdr images))
@@ -2357,6 +2358,46 @@ That is HTML-FILE, and the directory it is in when that is one made by
     (if (string-prefix-p "s3-publish-export-" (file-name-nondirectory dir))
         (list dir)
       (list html-file))))
+
+(defun s3-publish--self-destruct-time (lifetime)
+  "Return when an object uploaded now becomes due for deletion after LIFETIME.
+S3 lifecycle rules round the expiry up to the next midnight UTC, and the
+deletion itself happens some time after that, so the object is never
+gone before this."
+  (let ((due (+ (float-time) (s3-publish--parse-duration lifetime))))
+    (seconds-to-time (* 86400 (ceiling due 86400)))))
+
+(defun s3-publish--add-self-destruct (html-file profile)
+  "Say in HTML-FILE's postamble when PROFILE's bucket will delete the page.
+Only for a profile with a :lifetime, see `s3-publish-bucket-lifecycle'.
+It goes under the postamble's date, in the same format, the two lined
+up in columns: a small grid, styled inline so any theme shows it so."
+  (let ((lifetime (plist-get profile :lifetime)))
+    (when lifetime
+      (let ((due (format-time-string
+                  (or (bound-and-true-p org-html-metadata-timestamp-format)
+                      "%Y-%m-%d %a %H:%M")
+                  (s3-publish--self-destruct-time lifetime))))
+        (with-temp-buffer
+          (insert-file-contents html-file)
+          (goto-char (point-min))
+          (cond
+           ((re-search-forward
+             "<p class=\"date\">\\([^<:]*\\):[ \t]*\\([^<]*\\)</p>" nil t)
+            (replace-match
+             (format (concat "<div class=\"s3-publish-dates\" style=\"display: grid; "
+                             "grid-template-columns: max-content auto; "
+                             "gap: 1em 0.6em; margin: 1em 0;\">\n"
+                             "<span>%s:</span><span class=\"date\">%s</span>\n"
+                             "<span>Will Self-Destruct:</span>"
+                             "<span class=\"self-destruct\">%s</span>\n"
+                             "</div>")
+                     (match-string 1) (match-string 2) due)
+             t t))
+           ((re-search-forward "<div id=\"postamble\"[^>]*>\n?" nil t)
+            (insert (format "<p class=\"self-destruct\">Will Self-Destruct: %s</p>\n"
+                            due))))
+          (write-region (point-min) (point-max) html-file nil 'quiet))))))
 
 (defun s3-publish--transfer-document (profile uploads url title description)
   "Upload a document's files to PROFILE's bucket, then list it.
