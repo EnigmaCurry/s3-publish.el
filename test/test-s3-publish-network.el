@@ -227,7 +227,7 @@
         (test-s3-publish--write-png png)
         (let ((html (test-s3-publish--publish-markdown md)))
           (should (string-match-p "<img src=\"data:image/png;base64," html))
-          (should-not (string-match-p "src=\"shot.png\"" html))
+          (should-not (string-match-p " src=\"shot.png\"" html))
           (should-not (test-s3-publish--object (test-s3-publish--key png))))))))
 
 (ert-deftest s3-publish-test-net-image-upload-mode ()
@@ -1026,5 +1026,145 @@ tangled content
       (let ((result (test-s3-publish--s3p "list" "no-such-profile")))
         (should (= 1 (car result)))
         (should (string-match-p "no-such-profile" (alist-get 'error (cdr result))))))))
+
+;;; Editing published files live
+
+(defmacro test-s3-publish-editing (var target &rest body)
+  "Open TARGET with `s3-publish-edit' as the test profile, VAR the buffer.
+Kills the buffer afterwards, discarding changes."
+  (declare (indent 2) (debug t))
+  `(let ((,var (save-window-excursion (s3-publish-edit "test" ,target))))
+     (unwind-protect
+         (with-current-buffer ,var ,@body)
+       (when (buffer-live-p ,var)
+         (with-current-buffer ,var (set-buffer-modified-p nil))
+         (kill-buffer ,var)))))
+
+(defun test-s3-publish--count (regexp string)
+  "Return how many times REGEXP matches in STRING."
+  (let ((count 0) (start 0))
+    (while (string-match regexp string start)
+      (setq count (1+ count) start (match-end 0)))
+    count))
+
+(defun test-s3-publish--bucket-keys ()
+  "Return the sorted keys in the fake bucket."
+  (let ((dir (expand-file-name "objects/bkt" test-s3-publish--root)))
+    (sort (seq-remove (lambda (f) (string-suffix-p ".args" f))
+                      (directory-files dir nil "\\`[^.]"))
+          #'string<)))
+
+(ert-deftest s3-publish-test-edit-document-republishes-to-same-url ()
+  "Editing a page edits its source and republishes it at the same URL."
+  (test-s3-publish-with-fake-s3
+    (test-s3-publish-with-file org "doc.org" "#+TITLE: Doc\n\nOriginal.\n"
+      (let* ((url (s3-publish-api-publish org "test"))
+             (url (plist-get url :url))
+             (keys (test-s3-publish--bucket-keys)))
+        (test-s3-publish-editing buffer url
+          ;; The source, not the page, in a temporary file of its own.
+          (should (equal (buffer-string) "#+TITLE: Doc\n\nOriginal.\n"))
+          (should (derived-mode-p 'org-mode))
+          (should s3-publish-on-save-mode)
+          (should-not (equal buffer-file-name org))
+          (let ((dir (plist-get s3-publish--edit-session :dir)))
+            (should (file-in-directory-p buffer-file-name dir))
+            (test-s3-publish--edit-and-save "#+TITLE: Doc\n\nEdited live.\n")
+            (should (string-match-p "Edited live"
+                                    (test-s3-publish--object
+                                     (test-s3-publish--key org ".html"))))
+            (should (equal (test-s3-publish--object (test-s3-publish--key org))
+                           "#+TITLE: Doc\n\nEdited live.\n"))
+            ;; Same objects, same single feed entry, same URL.
+            (should (equal (test-s3-publish--bucket-keys) keys))
+            (let ((feed (test-s3-publish--object "index.xml")))
+              (should (= 1 (test-s3-publish--count "<item>" feed)))
+              (should (string-match-p (regexp-quote url) feed)))
+            (kill-buffer buffer)
+            (should-not (file-exists-p dir))))
+        ;; The original on disk is untouched.
+        (should (equal (with-temp-buffer (insert-file-contents org) (buffer-string))
+                       "#+TITLE: Doc\n\nOriginal.\n"))))))
+
+(ert-deftest s3-publish-test-edit-keeps-published-images ()
+  "An edit session keeps the images the page was published with."
+  (test-s3-publish-with-fake-s3
+    (test-s3-publish-with-file org "doc.org"
+        "#+TITLE: D\n\n[[file:img/big.png]]\n\n[[file:small.png]]\n"
+      (let ((dir (file-name-directory org)))
+        (test-s3-publish--write-png (expand-file-name "img/big.png" dir))
+        ;; Padded past the limit below, so it is uploaded, not embedded.
+        (let ((coding-system-for-write 'binary))
+          (write-region (make-string 5000 0) nil
+                        (expand-file-name "img/big.png" dir) t 'quiet))
+        (test-s3-publish--write-png (expand-file-name "small.png" dir))
+        (let* ((s3-publish-html-inline-image-max-size 4500)
+               (result (s3-publish-api-publish org "test")))
+          (with-temp-file (expand-file-name "small.png" dir) (insert "x"))
+          (test-s3-publish-editing buffer (car (plist-get result :keys))
+            (test-s3-publish--edit-and-save
+             "#+TITLE: D\n\nNew text.\n\n[[file:img/big.png]]\n\n[[file:small.png]]\n")
+            (let ((html (test-s3-publish--object
+                         (test-s3-publish--key org ".html"))))
+              (should (string-match-p "New text" html))
+              ;; The uploaded image is still linked...
+              (should (string-match-p
+                       (regexp-quote (car (plist-get result :images))) html))
+              ;; ...and the embedded one still embedded.
+              (should (string-match-p
+                       "src=\"data:image/png;base64,[^\"]+\" data-s3-publish-src=\"small.png\""
+                       html))
+              (should-not (string-match-p " src=\"\\(img/big\\|small\\).png\"" html)))))))))
+
+(ert-deftest s3-publish-test-edit-markdown-and-plain-files ()
+  "Markdown sources and plain files are edited in place the same way."
+  (test-s3-publish-with-fake-s3
+    (test-s3-publish-with-file md "doc.md" "# Title\n\nFirst.\n"
+      (s3-publish-api-publish md "test")
+      (test-s3-publish-editing buffer (test-s3-publish--key md ".html")
+        (should (equal (buffer-string) "# Title\n\nFirst.\n"))
+        (test-s3-publish--edit-and-save "# Title\n\nSecond.\n")
+        (should (string-match-p "Second" (test-s3-publish--object
+                                          (test-s3-publish--key md ".html"))))))
+    (test-s3-publish-with-file txt "notes.txt" "one"
+      (let ((url (plist-get (s3-publish-api-publish txt "test") :url)))
+        (test-s3-publish-editing buffer url
+          (test-s3-publish--edit-and-save "two")
+          (should (equal (test-s3-publish--object (test-s3-publish--key txt)) "two"))
+          (should (= 1 (test-s3-publish--count "<item>" (test-s3-publish--object "index.xml")))))))))
+
+(ert-deftest s3-publish-test-edit-refuses-pages-without-source ()
+  "A page with no source in the bucket, like the index, cannot be edited."
+  (test-s3-publish-with-fake-s3
+    (test-s3-publish-with-file txt "a.txt" "a"
+      (s3-publish-api-publish txt "test")
+      (should-error (s3-publish-edit "test" "index.html") :type 'user-error)
+      (should-error (s3-publish-edit "test" "nothing-here.txt") :type 'user-error))))
+
+(ert-deftest s3-publish-test-edit-reuses-an-open-session ()
+  "Editing the same file twice returns the buffer already open."
+  (test-s3-publish-with-fake-s3
+    (test-s3-publish-with-file txt "a.txt" "a"
+      (let ((key (test-s3-publish--key txt)))
+        (s3-publish-api-publish txt "test")
+        (test-s3-publish-editing buffer key
+          (should (eq (save-window-excursion (s3-publish-edit "test" key))
+                      buffer)))))))
+
+(ert-deftest s3-publish-test-list-edit-key ()
+  "`e' in the list edits the entry at point."
+  (test-s3-publish-with-fake-s3
+    (test-s3-publish-with-file org "doc.org" "#+TITLE: Doc\n"
+      (s3-publish-api-publish org "test")
+      (test-s3-publish-with-list
+        (goto-char (point-min))
+        (should (eq (lookup-key s3-publish-list-mode-map "e") #'s3-publish-list-edit))
+        (let ((buffer (save-window-excursion (s3-publish-list-edit))))
+          (unwind-protect
+              (should (equal (plist-get (buffer-local-value 's3-publish--edit-session
+                                                            buffer)
+                                        :key)
+                             (test-s3-publish--key org)))
+            (kill-buffer buffer)))))))
 
 (provide 'test-s3-publish-network)

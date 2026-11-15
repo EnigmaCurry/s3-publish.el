@@ -897,8 +897,15 @@ this function returns the public URL for the file (constructed as
   https://BUCKET.HOST_BASE/KEY).
 If :public-acl is nil, it returns the S3 URI (e.g., s3://BUCKET/KEY).
 If the upload fails, it signals an error with the error message."
-  (let* ((key (s3-publish-get-file-key file (plist-get profile :salt)))
-         (url (s3-publish--object-url profile key)))
+  (s3-publish--upload-file-as
+   file profile (s3-publish-get-file-key file (plist-get profile :salt))
+   title description))
+
+(defun s3-publish--upload-file-as (file profile key &optional title description)
+  "Upload FILE to KEY in PROFILE's bucket, and list it in the feed.
+Like `s3-publish-upload-file', but to a given KEY rather than one
+derived from FILE's path.  Returns the URL."
+  (let ((url (s3-publish--object-url profile key)))
     (s3-publish--put profile file key nil t)
     (when (and (plist-get profile :rss-feed)
                (plist-get profile :public-acl))
@@ -1917,6 +1924,27 @@ not an error to sign a key that does not exist."
 (defvar s3-publish--on-save nil
   "Non-nil while `s3-publish-on-save-mode' is republishing a buffer.")
 
+(defvar s3-publish--key-override nil
+  "When non-nil, the key to publish the current file under.
+Normally a file's key derives from its path.  An edit session of a
+published file (see `s3-publish-edit') edits a temporary copy, which
+must publish back to the original's key instead.  For a document this
+is the source's key; the HTML page shares its base.")
+
+(defvar-local s3-publish--edit-session nil
+  "In a buffer editing a published file, a plist describing the session.
+:profile is the profile name, :key the key the buffer publishes to, :dir
+the temporary directory holding the buffer's file, and :images the
+images of the published page (see `s3-publish--previous-images').  Set
+by `s3-publish-edit'.")
+(put 's3-publish--edit-session 'permanent-local t)
+
+(defvar s3-publish--previous-images nil
+  "Images of the previously published version of the page being published.
+An alist of (ORIGINAL-SRC . PUBLISHED-SRC), used for a local image that
+cannot be read, as in an edit session's temporary copy.  See
+`s3-publish--page-images'.")
+
 (defvar s3-publish--profile-override nil
   "When non-nil, the name of the profile to publish with, without asking.")
 
@@ -1952,8 +1980,10 @@ Returns the HTML URL, which is also copied to the kill ring."
   (let* ((profile (s3-publish--select-profile))
          (salt (plist-get profile :salt))
          (base-key (file-name-sans-extension
-                    (s3-publish-get-file-key source-file salt)))
-         (source-key (concat base-key (or (file-name-extension source-file t) "")))
+                    (or s3-publish--key-override
+                        (s3-publish-get-file-key source-file salt))))
+         (source-key (or s3-publish--key-override
+                         (concat base-key (or (file-name-extension source-file t) ""))))
          (html-key (concat base-key ".html"))
          (source-url (s3-publish--shareable-url profile source-key))
          (html-url (s3-publish--shareable-url profile html-key))
@@ -2167,6 +2197,27 @@ Returns nil when SRC is a URL rather than a local file."
                ;; A data URI cannot carry the line breaks added by default.
                t)))))
 
+(defun s3-publish--image-src (uri original)
+  "Return the src attribute value URI, recording the ORIGINAL src after it.
+The result replaces the value inside src=\"...\": it closes that
+attribute and adds data-s3-publish-src with ORIGINAL, which is already
+escaped as an attribute value.  Recording it lets a later edit of the
+page's source keep the image; see `s3-publish--page-images'."
+  (concat uri "\" data-s3-publish-src=\"" original))
+
+(defun s3-publish--page-images (html)
+  "Return the images s3-publish rewrote in the published page HTML.
+An alist of (ORIGINAL-SRC . PUBLISHED-SRC), as recorded by
+`s3-publish--image-src'."
+  (let ((images nil)
+        (start 0))
+    (while (string-match
+            "<img[^>]*?[ \t\n]src=\"\\([^\"]*\\)\"[ \t\n]+data-s3-publish-src=\"\\([^\"]*\\)\""
+            html start)
+      (setq start (match-end 0))
+      (push (cons (match-string 2 html) (match-string 1 html)) images))
+    (nreverse images)))
+
 (defun s3-publish--localize-images (html-file directory profile)
   "Rewrite the local images in HTML-FILE so they work once published.
 Relative image links are resolved against DIRECTORY, the directory of
@@ -2183,9 +2234,14 @@ Returns the images to upload, as a list of (FILE . KEY)."
               (case-fold-search t))
           (while (re-search-forward "<img[^>]*?[ \t\n]src=\"\\([^\"]*\\)\"" nil t)
             (let* ((src (match-string 1))
-                   (file (s3-publish--local-image-file src directory)))
+                   (file (s3-publish--local-image-file src directory))
+                   (previous (cdr (assoc src s3-publish--previous-images))))
               (cond
                ((null file))
+               ((and (not (file-readable-p file)) previous)
+                ;; Not here, but published before: keep what was published.
+                (replace-match (s3-publish--image-src previous src) t t nil 1)
+                (setq modified t))
                ((not (file-readable-p file))
                 (display-warning 's3-publish
                                  (format "Cannot read image %s; left as is" file)))
@@ -2200,7 +2256,7 @@ Returns the images to upload, as a list of (FILE . KEY)."
                       (unless (assoc file uploads)
                         (push (cons file key) uploads))
                       (setq uri (s3-publish--shareable-url profile key))))
-                  (replace-match uri t t nil 1)
+                  (replace-match (s3-publish--image-src uri src) t t nil 1)
                   (setq modified t))))))
           (when modified
             (write-region (point-min) (point-max) html-file nil 'quiet)))))
@@ -2401,6 +2457,8 @@ not wait for the upload."
   "Republish the current buffer, for `s3-publish-on-save-mode'.
 An error is reported rather than signalled, so it never fails the save."
   (let ((s3-publish--profile-override s3-publish-on-save-profile)
+        (s3-publish--key-override (plist-get s3-publish--edit-session :key))
+        (s3-publish--previous-images (plist-get s3-publish--edit-session :images))
         (s3-publish--on-save t))
     (condition-case err
         (cond
@@ -2416,11 +2474,12 @@ Unlike `s3-publish-buffer' the file itself is uploaded, not a temporary
 copy, so its key -- and URL -- is the same every time."
   (let* ((file buffer-file-name)
          (profile (s3-publish--select-profile))
-         (key (s3-publish-get-file-key file (plist-get profile :salt)))
+         (key (or s3-publish--key-override
+                  (s3-publish-get-file-key file (plist-get profile :salt))))
          (url (s3-publish--shareable-url profile key)))
     (s3-publish--run url (format "%s/%s" (plist-get profile :bucket) key)
-                     's3-publish-upload-file
-                     (list file profile (file-name-nondirectory file)
+                     's3-publish--upload-file-as
+                     (list file profile key (file-name-nondirectory file)
                            (format "Published on %s"
                                    (format-time-string "%Y-%m-%d %H:%M"))))
     (s3-publish--announce url)))
@@ -3442,6 +3501,110 @@ copied to the kill ring, and displayed."
       result-str)))
 
 
+;;; Editing published files ---------------------------------------------------
+;; A published file can be edited live, without its original on disk: its
+;; source is downloaded into a temporary file, and every save publishes it
+;; back to the same key -- the same URL.
+
+(defvar s3-publish-list--profile-name)
+
+(defun s3-publish--source-key (profile key)
+  "Return the key whose contents to edit to change KEY in PROFILE's bucket.
+For a document's HTML page that is its source, which shares its base
+key; anything else is edited as itself.  Signals an error for a page
+whose source is not in the bucket."
+  (if (not (string-suffix-p ".html" key))
+      key
+    (let* ((base (file-name-sans-extension key))
+           (source (seq-find
+                    (lambda (candidate)
+                      (and (equal (file-name-sans-extension candidate) base)
+                           (s3-publish--document-file-p candidate)))
+                    (mapcar (lambda (object) (plist-get object :key))
+                            (s3-publish--bucket-objects profile base)))))
+      (unless source
+        (if (member key (list s3-publish-html-index-filename))
+            (user-error "The HTML index is generated; it cannot be edited")
+          (user-error "No Org or Markdown source for %s in the bucket; \
+only documents published by s3-publish can be edited" key)))
+      source)))
+
+(defun s3-publish-edit (profile-name target)
+  "Edit the published file TARGET live: every save republishes it.
+
+TARGET is a URL, an s3:// URI or a key in the bucket of the profile
+named PROFILE-NAME.  For a document's HTML page its Org or Markdown
+source is opened, and saving re-exports the page.  The file is
+downloaded into a temporary directory and visited there, with
+`s3-publish-on-save-mode' on, publishing back to the same key: the URL,
+and the entry in the RSS feed and HTML index, stay the same.  Killing
+the buffer deletes the temporary copy.
+
+Local images the source links to are not downloaded.  A page published
+with this version of s3-publish records them, so saving keeps the
+images it was published with; on an older page they come out broken,
+until it is published once more from the original file."
+  (interactive
+   (let ((name (s3-publish--read-profile-name)))
+     (list name (read-string "Edit published URL or key: "))))
+  (let* ((profile (s3-publish-get-credentials (s3-publish-get-profile profile-name)))
+         (target (string-trim target))
+         (key (if (string-match-p "\\`[a-zA-Z][a-zA-Z0-9+.-]*://" target)
+                  (s3-publish--url-key profile target)
+                (string-remove-prefix "/" target)))
+         (source-key (s3-publish--source-key profile key))
+         (existing (seq-find
+                    (lambda (buffer)
+                      (let ((session (buffer-local-value 's3-publish--edit-session
+                                                         buffer)))
+                        (and (equal (plist-get session :profile) profile-name)
+                             (equal (plist-get session :key) source-key))))
+                    (buffer-list))))
+    (if existing
+        (pop-to-buffer-same-window existing)
+      (let ((content (s3-publish--get profile source-key)))
+        (unless content
+          (user-error "Nothing published at %s, or it is empty" source-key))
+        (let* ((dir (make-temp-file "s3-publish-edit-" t))
+               (file (expand-file-name (file-name-nondirectory source-key) dir))
+               (html (and (s3-publish--document-file-p source-key)
+                          (s3-publish--get
+                           profile (concat (file-name-sans-extension source-key)
+                                           ".html")))))
+          (let ((coding-system-for-write 'utf-8))
+            (write-region content nil file nil 'quiet))
+          (pop-to-buffer-same-window (find-file-noselect file))
+          (setq s3-publish--edit-session
+                (list :profile profile-name :key source-key :dir dir
+                      :images (and html (s3-publish--page-images html))))
+          (setq s3-publish-on-save-profile profile-name)
+          (s3-publish-on-save-mode 1)
+          (add-hook 'kill-buffer-hook #'s3-publish--end-edit-session nil t)
+          (rename-buffer (format "%s<s3:%s>" (file-name-nondirectory source-key)
+                                 profile-name)
+                         t)
+          (message "Editing %s; saving republishes it to %s"
+                   source-key (s3-publish--shareable-url profile key))
+          (current-buffer))))))
+
+(defun s3-publish--end-edit-session ()
+  "Delete the temporary copy of the buffer's edit session.
+Waits for background uploads to finish first, since they read it."
+  (let ((dir (plist-get s3-publish--edit-session :dir)))
+    (when dir
+      (s3-publish--delete-when-idle dir))))
+
+(defun s3-publish--delete-when-idle (dir)
+  "Delete DIR once no background upload is running or waiting."
+  (if (or s3-publish--running s3-publish--queue)
+      (run-with-timer 5 nil #'s3-publish--delete-when-idle dir)
+    (s3-publish--delete-if-exists dir)))
+
+(defun s3-publish-list-edit ()
+  "Edit the file at point live; see `s3-publish-edit'."
+  (interactive)
+  (s3-publish-edit s3-publish-list--profile-name (s3-publish-list--key)))
+
 ;;; Listing published files ---------------------------------------------------
 
 (defvar-local s3-publish-list--profile-name nil
@@ -3675,6 +3838,7 @@ A document's source file is deleted along with its HTML page."
     (define-key map "s" #'s3-publish-list-sign-url)
     (define-key map "D" #'s3-publish-list-delete)
     (define-key map "t" #'s3-publish-list-toggle-source)
+    (define-key map "e" #'s3-publish-list-edit)
     (define-key map "g" #'s3-publish-list-refresh)
     map)
   "Keymap for `s3-publish-list-mode'.")
@@ -3683,7 +3847,8 @@ A document's source file is deleted along with its HTML page."
   "Major mode listing the files published with an s3-publish profile.
 \\<s3-publish-list-mode-map>
 \\[s3-publish-list-browse] opens a file in the browser, \\[s3-publish-list-copy-url] copies its URL,
-\\[s3-publish-list-sign-url] copies a signed URL that expires, \\[s3-publish-list-delete] deletes it,
+\\[s3-publish-list-sign-url] copies a signed URL that expires, \\[s3-publish-list-edit] edits it live,
+\\[s3-publish-list-delete] deletes it,
 \\[s3-publish-list-toggle-source] switches between the feed and the whole bucket, and
 \\[s3-publish-list-refresh] fetches the list again."
   (setq tabulated-list-padding 1))

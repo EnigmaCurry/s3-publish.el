@@ -654,9 +654,28 @@ its size, including the feed, the index and uploaded images. On a line:
 | =s=   | Copy a signed URL that expires                            |
 | =D=   | Delete it from the bucket, the feed and the index         |
 | =t=   | Switch between the feed and the whole bucket              |
+| =e=   | Edit it live: every save republishes it                   |
 | =g=   | Fetch the list again                                      |
 
 Deleting a document deletes its source file along with its HTML page.
+
+*** Editing a published file live
+
+Press =e= on a line, or run =M-x s3-publish-edit= with a URL, to edit a
+published file without its original on disk. For a document's HTML page
+its Org or Markdown source opens; anything else opens as itself. The
+file is downloaded to a temporary directory with
+=s3-publish-on-save-mode= turned on, and every save republishes it to
+the same key -- the same URL, the same entry in the feed and index. It
+works like a live editor for what you have published. Killing the
+buffer deletes the temporary copy; your original file, if you still
+have it, is not touched.
+
+Local images are not downloaded. Instead, published pages record each
+image's original link, so saving keeps the images the page was
+published with. A page published before s3-publish recorded them loses
+its images when edited this way, until it is published once more from
+the original file.
 A file in a private bucket opens through a signed URL that works for an
 hour.
 
