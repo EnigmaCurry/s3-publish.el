@@ -1225,4 +1225,34 @@ republished one: a lazy regexp matched across item boundaries."
     ;; A URL that merely starts another's is not a match.
     (should-not (s3-publish--feed-item-bounds "https://h/"))))
 
+(ert-deftest s3-publish-test-rebuild-feed-from-index ()
+  "A feed that lost items is rebuilt from the HTML index."
+  (test-s3-publish-with-fake-s3
+    (test-s3-publish-with-file a "a.txt" "a"
+      (test-s3-publish-with-file b "b.txt" "b"
+        (s3-publish-api-publish a "test" "Title A")
+        (s3-publish-api-publish b "test" "Title <b>B</b>")
+        ;; Lose every item, as the old republish bug did.
+        (let* ((profile (s3-publish-get-credentials test-s3-publish--profile))
+               (feed (test-s3-publish--object "index.xml")))
+          (s3-publish--put-string
+           profile
+           (replace-regexp-in-string "<item>\\(?:.\\|\n\\)*?</item>" "" feed)
+           "index.xml" "application/rss+xml"))
+        (should (= 0 (test-s3-publish--count "<item>" (test-s3-publish--object "index.xml"))))
+        (should (= 2 (s3-publish-rebuild-feed "test")))
+        (let ((items (s3-publish--feed-items (test-s3-publish--object "index.xml"))))
+          ;; Oldest first, as publishing appends them.
+          (should (equal (mapcar (lambda (i) (plist-get i :title)) items)
+                         '("Title A" "Title <b>B</b>")))
+          (should (equal (plist-get (car items) :link)
+                         (concat "https://bkt.fake-endpoint/" (test-s3-publish--key a))))
+          (should (plist-get (car items) :date))
+          (should (string-match-p "published on" (downcase (plist-get (car items) :description)))))
+        ;; The channel header is kept.
+        (should (string-match-p "<title>T</title>" (test-s3-publish--object "index.xml")))
+        ;; Rebuilding again changes nothing but the build date.
+        (should (= 2 (s3-publish-rebuild-feed "test")))
+        (should (= 2 (test-s3-publish--count "<item>" (test-s3-publish--object "index.xml"))))))))
+
 (provide 'test-s3-publish-network)

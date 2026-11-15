@@ -4191,6 +4191,94 @@ they will be updated rather than duplicated."
         (message "Updated RSS feed and HTML index for %s"
                  (plist-get profile :name))))))
 
+(defun s3-publish--index-entries (html)
+  "Parse the HTML index HTML into plists of :url, :title, :date, :description.
+In the order the index lists them, newest first."
+  (let ((entries nil))
+    (with-temp-buffer
+      (insert html)
+      (goto-char (point-min))
+      (while (re-search-forward "<div class=\"entry\">" nil t)
+        (let* ((beg (match-beginning 0))
+               (limit (save-excursion
+                        (if (re-search-forward "<div class=\"entry\">" nil t)
+                            (match-beginning 0)
+                          (point-max))))
+               (entry (buffer-substring beg limit)))
+          (when (string-match "<h2><a href=\"\\([^\"]*\\)\">\\(\\(?:.\\|\n\\)*?\\)</a></h2>"
+                              entry)
+            (let ((url (match-string 1 entry))
+                  (title (match-string 2 entry)))
+              (push (list :url url
+                          :title title
+                          :date (and (string-match
+                                      "<div class=\"date\">\\([^<]*\\)</div>" entry)
+                                     (ignore-errors
+                                       (date-to-time (match-string 1 entry))))
+                          :description
+                          (if (string-match
+                               "<div class=\"description\">\\(\\(?:.\\|\n\\)*?\\)</div>[ \t\n]*<div class=\"link\">"
+                               entry)
+                              (match-string 1 entry)
+                            ""))
+                    entries))))))
+    (nreverse entries)))
+
+(defun s3-publish-rebuild-feed (profile-name)
+  "Rebuild the RSS feed of PROFILE-NAME from its HTML index.
+
+The feed and the index list the same files, so when the feed has lost
+entries the index can restore them.  Every item in the feed is replaced
+by one per index entry, with the index's title, description and date;
+the feed's own title and description are kept.  Returns the number of
+items written."
+  (interactive (list (s3-publish--read-profile-name)))
+  (let* ((profile (s3-publish-get-credentials (s3-publish-get-profile profile-name)))
+         (index (or (s3-publish--get profile s3-publish-html-index-filename)
+                    (user-error "Profile %s has no HTML index to rebuild from"
+                                profile-name)))
+         (entries (s3-publish--index-entries index))
+         (feed (or (s3-publish--get profile s3-publish-rss-filename)
+                   (s3-publish-create-new-rss-feed profile))))
+    (unless entries
+      (user-error "The HTML index of %s lists nothing" profile-name))
+    (setq feed
+          (with-temp-buffer
+            (insert feed)
+            ;; Drop every item, then add one per index entry, oldest first,
+            ;; the order publishing appends them in.
+            (goto-char (point-min))
+            (while (re-search-forward "[ \t]*<item>\\(?:.\\|\n\\)*?</item>[ \t]*\n?" nil t)
+              (replace-match "" t t))
+            (goto-char (point-min))
+            (unless (search-forward "</channel>" nil t)
+              (error "The feed of %s has no </channel>" profile-name))
+            (goto-char (match-beginning 0))
+            (dolist (entry (reverse entries))
+              (insert (format "    <item>
+      <title>%s</title>
+      <link>%s</link>
+      <guid>%s</guid>
+      <description><![CDATA[%s]]></description>
+      <pubDate>%s</pubDate>
+    </item>\n"
+                              (plist-get entry :title)
+                              (plist-get entry :url)
+                              (plist-get entry :url)
+                              (plist-get entry :description)
+                              (s3-publish-format-rfc822-date
+                               (or (plist-get entry :date) (current-time))))))
+            (insert "  ")
+            (goto-char (point-min))
+            (when (re-search-forward "<lastBuildDate>[^<]*</lastBuildDate>" nil t)
+              (replace-match (format "<lastBuildDate>%s</lastBuildDate>"
+                                     (s3-publish-format-rfc822-date (current-time)))
+                             t t))
+            (buffer-string)))
+    (s3-publish--put-string profile feed s3-publish-rss-filename "application/rss+xml")
+    (message "Rebuilt the RSS feed of %s with %d items" profile-name (length entries))
+    (length entries)))
+
 (defun s3-publish-s3fs-mount (profile-name mountpoint)
   "Mount the S3 bucket from PROFILE-NAME at MOUNTPOINT using s3fs.
 Checks if s3fs is installed, then mounts the bucket. The bucket
