@@ -744,7 +744,6 @@ the contents sidebar rather than under the text it belongs to."
                                 (make-list n t)))))
     (should (string-match-p "Author:" body))))
 
-(provide 'test-s3-publish)
 
 
 ;;; Tangling before publishing
@@ -976,3 +975,49 @@ Returns (DEFAULT . RESULT): what the prompt started on and what it returned."
                 ((symbol-function 's3-publish-get-credentials) #'identity))
         (should (equal (plist-get (s3-publish--select-profile) :name) "work")))
       (should (equal offered "work")))))
+
+
+;;; HTML index
+
+(defconst test-s3-publish--profile
+  '(:name "test" :bucket "b" :endpoint "https://example.com"))
+
+(ert-deftest s3-publish-test-html-index-is-themed ()
+  "The HTML index carries the page theme, like a published document."
+  (let ((s3-publish-html-theme 'default)
+        (index (s3-publish-create-new-html-index test-s3-publish--profile)))
+    (should (string-match-p (regexp-quote "div#content {") index))
+    (should (string-match-p "<div id=\"content\">" index))
+    (should (string-match-p "<link rel=\"icon\"" index))))
+
+(ert-deftest s3-publish-test-html-index-restyled-keeps-entries ()
+  "Restyling an old index replaces its page and keeps its entries."
+  (let* ((s3-publish-html-theme 'default)
+         (entry "
+    <div class=\"entry\">
+      <h2><a href=\"https://b.example.com/x.html\">X</a></h2>
+      <div class=\"date\">2026-01-01 00:00:00</div>
+      <div class=\"description\">about x</div>
+      <div class=\"link\"><a href=\"https://b.example.com/x.html\">https://b.example.com/x.html</a></div>
+    </div>")
+         (old (concat "<html><head><style>body { color: #555; }</style></head><body>
+  <h1>Old</h1>
+  <div class=\"description\">d</div>
+  <div class=\"entries\">" entry "
+  </div>
+  <div class=\"footer\">
+    <p>old footer</p>
+  </div>
+</body>
+</html>"))
+         (new (s3-publish--restyle-html-index test-s3-publish--profile old)))
+    (should (string-match-p (regexp-quote "div#content {") new))
+    (should-not (string-match-p "old footer" new))
+    (should (string-match-p (regexp-quote entry) new))
+    (should (equal (s3-publish--index-entries new)
+                   (s3-publish--index-entries old)))
+    ;; Restyling is idempotent.
+    (should (equal (s3-publish--restyle-html-index test-s3-publish--profile new)
+                   new))))
+
+(provide 'test-s3-publish)
