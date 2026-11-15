@@ -3,7 +3,7 @@
 ;; Author: EnigmaCurry
 ;; URL: https://github.com/EnigmaCurry/s3-publish.el
 ;; Version: 0.1
-;; Package-Requires: ((emacs "24.1"))
+;; Package-Requires: ((emacs "26.1"))
 ;; Keywords: s3, publish
 ;; SPDX-License-Identifier: 0BSD
 ;;
@@ -2302,7 +2302,6 @@ is uploaded, along with the temporary directory it was exported in.
 
 Returns the HTML URL, which is also copied to the kill ring."
   (let* ((profile (s3-publish--select-profile))
-         (salt (plist-get profile :salt))
          (source-key (or s3-publish--key-override
                          (s3-publish--document-source-key source-file profile)))
          (base-key (file-name-sans-extension source-key))
