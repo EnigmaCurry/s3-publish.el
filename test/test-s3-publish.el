@@ -548,6 +548,28 @@ Org's generated ids are content hashes that change between exports."
   (should (string-match-p test-s3-publish--copy-script (test-s3-publish--export-src-block)))
   (should (string-match-p "button\\.s3-publish-copy" s3-publish-html-default-style)))
 
+(ert-deftest s3-publish-test-link-expiry-notice-included ()
+  "Pages carry the signed-link countdown script, unless it is turned off.
+The theme styles the notice either way; it is the script that adds it."
+  (should (string-match-p "X-Amz-Expires" (test-s3-publish--export-src-block)))
+  (let ((s3-publish-html-link-expiry-notice nil))
+    (should-not (string-match-p "X-Amz-Expires"
+                                (test-s3-publish--export-src-block)))))
+
+(ert-deftest s3-publish-test-link-expiry-notice-without-copy-button ()
+  "The countdown does not depend on the copy button, nor it on the countdown."
+  (let ((s3-publish-html-copy-button nil))
+    (let ((html (test-s3-publish--export-src-block)))
+      (should (string-match-p "X-Amz-Expires" html))
+      (should-not (string-match-p "navigator\\.clipboard" html))))
+  (let ((s3-publish-html-link-expiry-notice nil))
+    (let ((html (test-s3-publish--export-src-block)))
+      (should-not (string-match-p "X-Amz-Expires" html))
+      (should (string-match-p "navigator\\.clipboard" html))))
+  (let ((s3-publish-html-copy-button nil)
+        (s3-publish-html-link-expiry-notice nil))
+    (should-not (s3-publish--html-scripts))))
+
 (ert-deftest s3-publish-test-copy-button-can-be-disabled ()
   "With `s3-publish-html-copy-button' nil, no script is added."
   (let ((s3-publish-html-copy-button nil))

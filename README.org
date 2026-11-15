@@ -615,6 +615,11 @@ credentials can use:
   (setq s3-publish-signed-url-expiry nil)   ; s3:// URIs
 #+end_src
 
+A page opened through a signed link says so at the bottom, in green,
+with a countdown to when the link stops working; if the page is left
+open past then, the notice turns red. Opened any other way it shows
+nothing. Turn it off with =(setq s3-publish-html-link-expiry-notice nil)=.
+
 To sign a link on demand -- for a file published earlier, or to hand
 out a link from a public bucket that stops working -- use:
 

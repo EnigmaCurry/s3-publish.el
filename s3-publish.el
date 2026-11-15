@@ -1266,6 +1266,17 @@ button.s3-publish-copy:hover {
 	border-color: #ff5370;
 }
 
+/* The countdown `s3-publish-html-link-expiry-notice' adds to a page opened
+   through a signed URL. */
+#s3-publish-expiry {
+	border-color: #2ea043;
+	color: #3fb950;
+}
+#s3-publish-expiry.s3-publish-expired {
+	border-color: #f85149;
+	color: #f85149;
+}
+
 /* Images out of Markdown carry no size constraint, so cap them. */
 #content img {
 	max-width: 100%;
@@ -1442,6 +1453,8 @@ th { background: #eaeef2; }
 .timestamp { color: #6e7781; }
 button.s3-publish-copy { border-color: #afb8c1; background: #f6f8fa; color: #1f2328; }
 button.s3-publish-copy:hover { border-color: #cf222e; }
+#s3-publish-expiry { border-color: #1a7f37; color: #1a7f37; }
+#s3-publish-expiry.s3-publish-expired { border-color: #cf222e; color: #cf222e; }
 #org-download { border-top-color: #d0d7de; }
 #org-download a { border-color: #afb8c1; background: #f6f8fa; }
 #org-download a:hover { border-color: #cf222e; }
@@ -1689,6 +1702,102 @@ document.addEventListener('DOMContentLoaded', function () {
 "
   "Markup that adds `s3-publish-html-copy-button' to each code block.")
 
+(defcustom s3-publish-html-link-expiry-notice t
+  "When non-nil, a page opened through a signed URL counts down to its expiry.
+
+A signed URL -- see `s3-publish-signed-url-expiry' -- only works until
+it expires.  A small inline script in every published page checks the
+address it was opened from: when that carries a signature with an
+expiry, a green notice under the page says how long the link keeps
+working, ticking down every second, and turns red once it has expired.
+Opened any other way, the page shows nothing.
+
+Like the copy button, it is added through `org-html-scripts', so it
+does not depend on `s3-publish-html-theme'; a theme can restyle
+`#s3-publish-expiry'."
+  :type 'boolean
+  :group 's3-publish)
+
+(defconst s3-publish-html-link-expiry-script "\
+<style>
+:where(#s3-publish-expiry) {
+  margin-top: 1em;
+  padding: 0.5em 0.9em;
+  border: 2px solid #2ea043;
+  border-radius: 5px;
+  color: #3fb950;
+  font-weight: bold;
+}
+:where(#s3-publish-expiry.s3-publish-expired) {
+  border-color: #f85149;
+  color: #f85149;
+}
+</style>
+<script>
+(function () {
+  // When this page was opened through a signed URL, the URL says when it
+  // stops working: s3cmd's signature version 2 gives the end as Expires,
+  // seconds since the epoch; version 4 gives X-Amz-Date plus
+  // X-Amz-Expires, seconds after it.
+  var params = new URLSearchParams(window.location.search);
+  var expires = NaN;
+  if (params.has('Expires')) {
+    expires = parseInt(params.get('Expires'), 10) * 1000;
+  } else if (params.has('X-Amz-Date') && params.has('X-Amz-Expires')) {
+    var d = params.get('X-Amz-Date');
+    expires = Date.UTC(+d.slice(0, 4), +d.slice(4, 6) - 1, +d.slice(6, 8),
+                       +d.slice(9, 11), +d.slice(11, 13), +d.slice(13, 15))
+      + parseInt(params.get('X-Amz-Expires'), 10) * 1000;
+  }
+  if (isNaN(expires)) { return; }
+  document.addEventListener('DOMContentLoaded', function () {
+    var note = document.createElement('div');
+    note.id = 's3-publish-expiry';
+    note.setAttribute('role', 'status');
+    var after = document.getElementById('org-download');
+    if (after) {
+      after.parentNode.insertBefore(note, after.nextSibling);
+    } else {
+      (document.getElementById('content') || document.body).appendChild(note);
+    }
+    var until = new Date(expires).toLocaleString(undefined, {
+      dateStyle: 'medium', timeStyle: 'short' });
+    var timer;
+    function tick() {
+      var left = Math.floor((expires - Date.now()) / 1000);
+      if (left <= 0) {
+        note.className = 's3-publish-expired';
+        note.textContent = 'This private link expired at ' + until
+          + '. Ask its owner for a new one.';
+        clearInterval(timer);
+        return;
+      }
+      var days = Math.floor(left / 86400);
+      var hours = Math.floor(left % 86400 / 3600);
+      var minutes = Math.floor(left % 3600 / 60);
+      var seconds = left % 60;
+      note.textContent = 'This private link expires in '
+        + (days ? days + 'd ' : '') + hours + 'h ' + minutes + 'm '
+        + seconds + 's (' + until + ').';
+    }
+    tick();
+    timer = setInterval(tick, 1000);
+  });
+})();
+</script>
+"
+  "Markup that adds `s3-publish-html-link-expiry-notice' to a page.")
+
+(defun s3-publish--html-scripts ()
+  "Return the scripts s3-publish adds to a published page, or nil for none."
+  (let ((scripts (concat (if s3-publish-html-copy-button
+                             s3-publish-html-copy-button-script
+                           "")
+                         (if s3-publish-html-link-expiry-notice
+                             s3-publish-html-link-expiry-script
+                           ""))))
+    (and (not (string-empty-p scripts)) scripts)))
+
 (defcustom s3-publish-html-ignore-advice '(org-html-src-block)
   "Org HTML export functions whose advice is ignored while publishing.
 
@@ -1784,14 +1893,14 @@ off leaves your own Org export settings untouched."
           ;; Org's own script slot, which a document's `#+HTML_HEAD:' does
           ;; not replace.  Whatever scripts the user already includes stay.
           (org-html-scripts
-           (if s3-publish-html-copy-button
+           (if (s3-publish--html-scripts)
                (concat (if org-html-head-include-scripts
                            (org-element-normalize-string org-html-scripts)
                          "")
-                       s3-publish-html-copy-button-script)
+                       (s3-publish--html-scripts))
              org-html-scripts))
           (org-html-head-include-scripts
-           (if s3-publish-html-copy-button t org-html-head-include-scripts)))
+           (if (s3-publish--html-scripts) t org-html-head-include-scripts)))
       (s3-publish--call-without-advice s3-publish-html-ignore-advice fn))))
 
 
