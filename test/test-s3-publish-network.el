@@ -536,12 +536,28 @@ an error, since saving must not prompt."
     (should (equal (s3-publish--signed-url test-s3-publish--profile "k.txt" 60)
                    "https://bkt.host/k.txt?AWSAccessKeyId=A&Expires=1&Signature=x%3D"))))
 
+(ert-deftest s3-publish-test-private-profile-signs-a-week-by-default ()
+  "Out of the box, a private profile hands out a URL signed for a week."
+  (test-s3-publish-with-fake-s3
+    (let ((s3-publish-profiles
+           (list (plist-put (copy-sequence test-s3-publish--profile)
+                            :public-acl nil)))
+          (s3-publish-signed-url-expiry
+           (eval (car (get 's3-publish-signed-url-expiry 'standard-value)) t)))
+      (with-temp-buffer
+        (insert "secret")
+        (let ((url (s3-publish-buffer)))
+          (should (string-prefix-p "https://bkt.fake-endpoint/" url))
+          (should (string-match-p "Expires=\\+604800" url))
+          (should (equal (car kill-ring) url)))))))
+
 (ert-deftest s3-publish-test-private-profile-hands-out-s3-uri ()
   "A private profile without an expiry hands out the s3:// URI."
   (test-s3-publish-with-fake-s3
     (let ((s3-publish-profiles
            (list (plist-put (copy-sequence test-s3-publish--profile)
-                            :public-acl nil))))
+                            :public-acl nil)))
+          (s3-publish-signed-url-expiry nil))
       (with-temp-buffer
         (insert "secret")
         (should (string-prefix-p "s3://bkt/" (s3-publish-buffer)))))))
@@ -654,11 +670,14 @@ an error, since saving must not prompt."
           (should (equal (mapcar #'car tabulated-list-entries)
                          (list (test-s3-publish--key file))))
           (should (equal (aref (cadr (car tabulated-list-entries)) 1) "5"))
-          ;; Private: copying gives the s3:// URI, opening a signed URL.
+          ;; Private: copying gives a URL signed for a week, opening one
+          ;; signed for an hour.
           (goto-char (point-min))
           (s3-publish-list-copy-url)
           (should (equal (car kill-ring)
-                         (concat "s3://bkt/" (test-s3-publish--key file))))
+                         (concat "https://bkt.fake-endpoint/"
+                                 (test-s3-publish--key file)
+                                 "?Expires=+604800&Signature=fake")))
           (let (opened)
             (cl-letf (((symbol-function 'browse-url)
                        (lambda (url &rest _) (setq opened url))))

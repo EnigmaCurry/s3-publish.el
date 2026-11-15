@@ -602,19 +602,18 @@ before:
 
 ** Private buckets and expiring links
 
-With a profile that does not make files public, publishing hands you
-an =s3://= URI, which only someone holding your credentials can use. To
-get a link you can share instead, set how long such links should work:
+With a profile that does not make files public, publishing copies a
+signed https URL: anyone can open it, but only for a week. The links
+inside a published page, to its source and to images uploaded beside
+it, are signed for as long, so they expire together; republishing (or
+saving in a live edit) signs them all afresh. Change how long links
+work, or go back to =s3://= URIs, which only someone holding your
+credentials can use:
 
 #+begin_src emacs-lisp
-  (setq s3-publish-signed-url-expiry "7d")
+  (setq s3-publish-signed-url-expiry "30d") ; a number, then s, m, h, d or w
+  (setq s3-publish-signed-url-expiry nil)   ; s3:// URIs
 #+end_src
-
-Publishing to a private profile then copies a signed https URL, which
-anyone can open until it expires. The links inside a published page,
-to its source and to images uploaded beside it, are signed too. A
-duration is a number of seconds, or a number followed by =s=, =m=, =h=,
-=d= or =w=.
 
 To sign a link on demand -- for a file published earlier, or to hand
 out a link from a public bucket that stops working -- use:

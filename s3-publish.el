@@ -1824,23 +1824,26 @@ A public https URL when PROFILE has :public-acl, otherwise an s3:// URI."
 ;; is one: it carries a signature made with your secret key, and stops
 ;; working when it expires.  Signing happens locally; nothing is uploaded.
 
-(defcustom s3-publish-signed-url-expiry nil
+(defcustom s3-publish-signed-url-expiry "7d"
   "How long the links s3-publish hands out for private files keep working.
 
-When nil, publishing with a profile that has no public ACL gives you an
-s3:// URI, which only someone with your credentials can use.  Set this
-to a duration and you get a signed https URL instead, which anyone can
-open until it expires: a number of seconds, or a number followed by s,
-m, h, d or w, e.g. \"12h\" or \"7d\".  The links inside a published
-page -- to its source, and to images uploaded beside it -- are signed
-too.
+Publishing with a profile that has no public ACL gives you a signed
+https URL, which anyone can open until it expires: by default a week.
+The duration is a number of seconds, or a number followed by s, m, h, d
+or w, e.g. \"12h\" or \"7d\".  The links inside a published page -- to
+its source, and to images uploaded beside it -- are signed for as long,
+so they expire with the page's own link; republishing signs them all
+afresh.
+
+nil hands out the s3:// URI instead, which only someone with your
+credentials can use.
 
 The signature is made by `s3cmd signurl', which uses AWS signature
 version 2.  DigitalOcean Spaces, MinIO and most S3 work-alikes accept
 it; AWS regions opened since 2014 do not.  See also
 `s3-publish-sign-url'."
-  :type '(choice (const :tag "Hand out s3:// URIs" nil)
-                 (string :tag "Duration"))
+  :type '(choice (string :tag "Duration")
+                 (const :tag "Hand out s3:// URIs" nil))
   :group 's3-publish)
 
 (defun s3-publish--parse-duration (duration)
